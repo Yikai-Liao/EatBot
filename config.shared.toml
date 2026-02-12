@@ -1,0 +1,40 @@
+# 共享配置（可提交）
+# 仅放非敏感信息：表标识、字段名映射。
+
+# 多维表格 Base 标识（get_node 的 obj_token）
+app_token = "PFD8b1u0jaos9vsKavBcHC4EnTg"
+
+# Wiki 页面 token（来自 /wiki/{token}）
+wiki_token = "QC07wNez9iSgZhk6rg7cOW2PnNb"
+
+[tables]
+# 四张业务表 table_id（来自链接参数 table=...）
+user_config = "tblrulMIAx0vnkHu"
+meal_schedule = "tblUONtouxmxvVFq"
+meal_record = "tblBkttZl5XmmFFB"
+stats_receivers = "tbl6brK6FcgCynAm"
+
+[field_names.user_config]
+# 逻辑字段名 -> 表中真实字段名
+display_name = "用餐人员名称"
+user = "人员"
+meal_preference = "餐食偏好"
+lunch_price = "午餐单价"
+dinner_price = "晚餐单价"
+enabled = "启用"
+
+[field_names.meal_schedule]
+start_date = "开始日期"
+end_date = "截止日期"
+meals = "当日餐食包含"
+remark = "备注"
+
+[field_names.meal_record]
+# 仅配置业务字段，不配置 ID 字段
+date = "日期"
+user = "用餐者"
+meal_type = "餐食类型"
+price = "价格"
+
+[field_names.stats_receivers]
+user = "人员"
