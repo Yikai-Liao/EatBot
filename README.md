@@ -3,7 +3,7 @@
 ## 1. 项目目标
 - 基于飞书机器人和飞书多维表格，实现工作日自动发起食堂预约。
 - 用户通过消息卡片勾选午餐/晚餐，系统自动写入和更新用餐记录。
-- 在每餐截止后自动发送统计结果给指定接收人。
+- 在每餐预约截止后自动发送统计结果给指定接收人。
 
 ## 2. 业务范围与约束
 - 数据存储：仅使用飞书多维表格，不使用本地数据库。
@@ -46,40 +46,31 @@
 - 用餐记录：https://ycnw20znloxr.feishu.cn/wiki/QC07wNez9iSgZhk6rg7cOW2PnNb?table=tblBkttZl5XmmFFB&view=vew7J3ypSr
 - 统计信息接收人员：https://ycnw20znloxr.feishu.cn/wiki/QC07wNez9iSgZhk6rg7cOW2PnNb?table=tbl6brK6FcgCynAm&view=vewt6jEAWP
 
-## 4.2 资源标识
-- wiki_token: `QC07wNez9iSgZhk6rg7cOW2PnNb`
-- app_token: `PFD8b1u0jaos9vsKavBcHC4EnTg`
-- table_id:
-- user_config: `tblrulMIAx0vnkHu`
-- meal_schedule: `tblUONtouxmxvVFq`
-- meal_record: `tblBkttZl5XmmFFB`
-- stats_receivers: `tbl6brK6FcgCynAm`
-
-## 4.3 已确认字段结构（2026-02-12）
+## 4.2 已确认字段结构（2026-02-12）
 ### 用餐人员配置（tblrulMIAx0vnkHu）
-- `fld2XqfsGo` `用餐人员名称` `type=20`
-- `fldlr2M9tU` `人员` `type=11`
-- `fldg2XhEP0` `餐食偏好` `type=4`
-- `fld3P7jB62` `午餐单价` `type=2`
-- `fldwEjynQo` `晚餐单价` `type=2`
-- `fldk0hgjQ5` `启用` `type=7`
+- `用餐人员名称` `type=20`
+- `人员` `type=11`
+- `餐食偏好` `type=4`
+- `午餐单价` `type=2`
+- `晚餐单价` `type=2`
+- `启用` `type=7`
 
 ### 用餐定时配置（tblUONtouxmxvVFq）
-- `fldYA7adAt` `开始日期` `type=5`
-- `fldEMgVCpg` `截止日期` `type=1`
-- `fldeGCuA2Y` `当日餐食包含` `type=4`
-- `fld162yoYG` `备注` `type=1`
+- `开始日期` `type=5`
+- `截止日期` `type=1`
+- `当日餐食包含` `type=4`
+- `备注` `type=1`
 
 ### 用餐记录（tblBkttZl5XmmFFB）
-- `fldE9D2MuW` `ID` `type=1005`
-- `fldrJ7l9JF` `日期` `type=5`
-- `fldPwtIqe4` `用餐者` `type=11`
-- `fldfFIuqF2` `餐食类型` `type=3`
-- `fldIb4SZGr` `价格` `type=1`
+- `ID` `type=1005`
+- `日期` `type=5`
+- `用餐者` `type=11`
+- `餐食类型` `type=3`
+- `价格` `type=1`
 
 ### 统计信息接收人员（tbl6brK6FcgCynAm）
-- `fldgCAPSrk` `ID` `type=1005`
-- `fldTkktZ2h` `人员` `type=11`
+- `ID` `type=1005`
+- `人员` `type=11`
 
 ## 5. 配置文件说明
 - `config.shared.toml`：可提交，保存 app_token、table_id、字段名映射。
