@@ -14,6 +14,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from eatbot.adapters.feishu_clients import BitableAdapter, FeishuFactory, FieldMappingResolver, IMAdapter
+from eatbot.adapters.ws_client import WsClientPatched
 from eatbot.config import ConfigError, load_runtime_config
 from eatbot.domain.models import Meal
 from eatbot.services.booking import BookingService
@@ -55,10 +56,11 @@ class EatBotApplication:
             .build()
         )
 
-        ws_client = lark.ws.Client(
+        ws_client = WsClientPatched(
             self._config.app_id,
             self._config.app_secret,
             event_handler=handler,
+            card_frame_handler=self._on_card_frame_action,
             log_level=lark.LogLevel.INFO,
         )
         logger.info("长连接已启动")
@@ -131,6 +133,11 @@ class EatBotApplication:
         if self._booking is None:
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "服务未初始化"}})
         return self._booking.handle_card_action(data)
+
+    def _on_card_frame_action(self, data) -> dict:
+        if self._booking is None:
+            return {"toast": {"type": "error", "content": "服务未初始化"}}
+        return self._booking.handle_card_frame_action(data)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import logging
 from typing import Any
 
 import lark_oapi as lark
@@ -20,10 +19,6 @@ from eatbot.config import RuntimeConfig
 
 class FeishuApiError(Exception):
     pass
-
-
-logger = logging.getLogger(__name__)
-
 
 @dataclass(slots=True)
 class FieldMeta:
@@ -159,22 +154,12 @@ class IMAdapter:
         return self._send(receive_id=receive_id, receive_id_type=receive_id_type, msg_type="text", content=content)
 
     def send_interactive(self, receive_id: str, card_json: str, receive_id_type: str = "open_id") -> str:
-        wrapped = json.dumps({"card": card_json}, ensure_ascii=False)
-        try:
-            return self._send(
-                receive_id=receive_id,
-                receive_id_type=receive_id_type,
-                msg_type="interactive",
-                content=wrapped,
-            )
-        except FeishuApiError as first_error:
-            logger.warning("interactive 内容使用 card 包装发送失败，尝试直接发送 card JSON: %s", first_error)
-            return self._send(
-                receive_id=receive_id,
-                receive_id_type=receive_id_type,
-                msg_type="interactive",
-                content=card_json,
-            )
+        return self._send(
+            receive_id=receive_id,
+            receive_id_type=receive_id_type,
+            msg_type="interactive",
+            content=card_json,
+        )
 
     def _send(self, *, receive_id: str, receive_id_type: str, msg_type: str, content: str) -> str:
         request = (
