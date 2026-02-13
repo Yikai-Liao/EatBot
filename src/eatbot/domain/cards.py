@@ -120,6 +120,17 @@ def _build_toggle_buttons(
             "toggle_meal": toggle.value,
         }
 
+    refresh_payload = {
+        "action": "refresh_state",
+        "target_date": target_date.isoformat(),
+        "target_open_id": user_open_id,
+        "allowed_meals": allowed_values,
+        "default_meals": default_values,
+        "selected_meals": selected_values,
+        "meal_prices": meal_price_values,
+        "meal_record_ids": meal_record_id_values,
+    }
+
     buttons: list[dict[str, Any]] = []
     for meal in allowed_meals:
         selected = meal in selected_meals
@@ -131,6 +142,14 @@ def _build_toggle_buttons(
                 "behaviors": [{"type": "callback", "value": payload(meal)}],
             }
         )
+    buttons.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "刷新"},
+            "type": "default",
+            "behaviors": [{"type": "callback", "value": refresh_payload}],
+        }
+    )
     return buttons
 
 

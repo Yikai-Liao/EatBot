@@ -43,6 +43,7 @@ class ConfigTests(unittest.TestCase):
             user = "B"
             meal_type = "C"
             price = "D"
+            reservation_status = "E"
 
             [field_names.stats_receivers]
             user = "A"
@@ -97,6 +98,7 @@ class ConfigTests(unittest.TestCase):
             user = "B"
             meal_type = "C"
             price = "D"
+            reservation_status = "E"
 
             [field_names.stats_receivers]
             user = "A"

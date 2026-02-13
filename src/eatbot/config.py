@@ -36,6 +36,7 @@ class MealRecordFieldNames(BaseModel):
     user: str
     meal_type: str
     price: str
+    reservation_status: str
 
 
 class StatsReceiversFieldNames(BaseModel):

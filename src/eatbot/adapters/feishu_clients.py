@@ -275,4 +275,26 @@ class FieldMappingResolver:
                 by_logical_key=logical_mapping,
             )
 
+        self._validate_cross_table_field_types(result)
         return result
+
+    @staticmethod
+    def _validate_cross_table_field_types(mappings: dict[str, TableFieldMapping]) -> None:
+        user_mapping = mappings["user_config"]
+        meal_record_mapping = mappings["meal_record"]
+
+        lunch_meta = user_mapping.by_logical_key["lunch_price"]
+        dinner_meta = user_mapping.by_logical_key["dinner_price"]
+        record_price_meta = meal_record_mapping.by_logical_key["price"]
+
+        type_values = {lunch_meta.field_type, dinner_meta.field_type, record_price_meta.field_type}
+        if len(type_values) == 1:
+            return
+
+        raise FeishuApiError(
+            "价格字段类型不一致: "
+            f"user_config.{lunch_meta.field_name}(type={lunch_meta.field_type}), "
+            f"user_config.{dinner_meta.field_name}(type={dinner_meta.field_type}), "
+            f"meal_record.{record_price_meta.field_name}(type={record_price_meta.field_type})。"
+            "请将三者调整为同一字段类型后重试。"
+        )

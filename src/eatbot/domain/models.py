@@ -9,7 +9,6 @@ from enum import StrEnum
 class Meal(StrEnum):
     LUNCH = "午餐"
     DINNER = "晚餐"
-    CANCELLED = "取消预约"
 
 
 @dataclass(slots=True)

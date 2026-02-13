@@ -35,6 +35,7 @@ date = "日期"
 user = "用餐者"
 meal_type = "餐食类型"
 price = "价格"
+reservation_status = "预约状态"
 
 [field_names.stats_receivers]
 user = "人员"

@@ -23,6 +23,7 @@ class MealRecordRow:
     target_date: date | None
     open_id: str | None
     meal_type: Meal | None
+    reservation_status: bool
 
 
 class BitableRepository:
@@ -125,14 +126,21 @@ class BitableRepository:
         prefer_direct: bool = False,
     ) -> str:
         started_at = mono_time.monotonic()
-        payload = self._meal_payload(target_date=target_date, open_id=open_id, meal=meal, price=price)
+        payload = self._meal_payload(
+            target_date=target_date,
+            open_id=open_id,
+            meal=meal,
+            price=price,
+            reservation_status=True,
+        )
+        update_payload = self._meal_update_payload(meal=meal, price=price, reservation_status=True)
         table_id = self._table_id("meal_record")
 
         if prefer_direct:
             if record_id:
                 update_started = mono_time.monotonic()
                 try:
-                    self._bitable.update_record(table_id=table_id, record_id=record_id, fields=payload)
+                    self._bitable.update_record(table_id=table_id, record_id=record_id, fields=update_payload)
                     logger.info(
                         "meal_record.upsert: mode=direct_update date=%s meal=%s cost=%dms",
                         target_date.isoformat(),
@@ -193,20 +201,6 @@ class BitableRepository:
             )
             return match.record_id
 
-        cancelled = next((row for row in rows if row.meal_type == Meal.CANCELLED), None)
-        if cancelled:
-            write_started = mono_time.monotonic()
-            self._bitable.update_record(table_id=table_id, record_id=cancelled.record_id, fields=payload)
-            logger.info(
-                "meal_record.upsert: mode=scan_reuse_cancelled date=%s meal=%s scan=%dms write=%dms total=%dms",
-                target_date.isoformat(),
-                meal.value,
-                scan_cost,
-                int((mono_time.monotonic() - write_started) * 1000),
-                int((mono_time.monotonic() - started_at) * 1000),
-            )
-            return cancelled.record_id
-
         write_started = mono_time.monotonic()
         created = self._bitable.create_record(table_id=table_id, fields=payload)
         logger.info(
@@ -238,12 +232,7 @@ class BitableRepository:
                     int((mono_time.monotonic() - started_at) * 1000),
                 )
                 return None
-            payload = self._meal_payload(
-                target_date=target_date,
-                open_id=open_id,
-                meal=Meal.CANCELLED,
-                price=Decimal("0"),
-            )
+            payload = self._meal_update_payload(price=Decimal("0"), reservation_status=False)
             write_started = mono_time.monotonic()
             try:
                 self._bitable.update_record(
@@ -278,8 +267,9 @@ class BitableRepository:
         payload = self._meal_payload(
             target_date=target_date,
             open_id=open_id,
-            meal=Meal.CANCELLED,
+            meal=meal,
             price=Decimal("0"),
+            reservation_status=False,
         )
         if match is None:
             if not record_id:
@@ -335,7 +325,10 @@ class BitableRepository:
 
     def count_meal_records(self, *, target_date: date, meal: Meal) -> int:
         rows = self._list_meal_rows(target_date=target_date, open_id=None)
-        return sum(1 for row in rows if row.meal_type == meal)
+        return sum(1 for row in rows if row.meal_type == meal and row.reservation_status)
+
+    def list_user_meal_rows(self, *, target_date: date, open_id: str) -> list[MealRecordRow]:
+        return self._list_meal_rows(target_date=target_date, open_id=open_id)
 
     def _list_meal_rows(self, *, target_date: date, open_id: str | None) -> list[MealRecordRow]:
         table_id = self._table_id("meal_record")
@@ -354,25 +347,62 @@ class BitableRepository:
                 continue
 
             meal_type = _to_meal(data.get(fields["meal_type"]))
+            reservation_status = _to_checkbox(data.get(fields["reservation_status"]), default=True)
             rows.append(
                 MealRecordRow(
                     record_id=record.record_id,
                     target_date=record_date,
                     open_id=record_open_id,
                     meal_type=meal_type,
+                    reservation_status=reservation_status,
                 )
             )
 
         return rows
 
-    def _meal_payload(self, *, target_date: date, open_id: str, meal: Meal, price: Decimal) -> dict[str, Any]:
+    def _meal_payload(
+        self,
+        *,
+        target_date: date,
+        open_id: str,
+        meal: Meal,
+        price: Decimal,
+        reservation_status: bool,
+    ) -> dict[str, Any]:
         fields = self._table_fields("meal_record")
         return {
             fields["date"]: _to_date_millis(target_date, self._timezone),
             fields["user"]: [{"id": open_id}],
             fields["meal_type"]: meal.value,
-            fields["price"]: _format_decimal(price),
+            fields["price"]: self._meal_price_field_value(price),
+            fields["reservation_status"]: reservation_status,
         }
+
+    def _meal_update_payload(
+        self,
+        *,
+        meal: Meal | None = None,
+        price: Decimal | None = None,
+        reservation_status: bool | None = None,
+    ) -> dict[str, Any]:
+        fields = self._table_fields("meal_record")
+        result: dict[str, Any] = {}
+        if meal is not None:
+            result[fields["meal_type"]] = meal.value
+        if price is not None:
+            result[fields["price"]] = self._meal_price_field_value(price)
+        if reservation_status is not None:
+            result[fields["reservation_status"]] = reservation_status
+        return result
+
+    def _meal_price_field_value(self, price: Decimal) -> int | float | str:
+        field_type = self._mappings["meal_record"].by_logical_key["price"].field_type
+        if field_type == 2:
+            normalized = price.normalize()
+            if normalized == normalized.to_integral():
+                return int(normalized)
+            return float(normalized)
+        return _format_decimal(price)
 
     def _table_id(self, table_alias: str) -> str:
         return self._mappings[table_alias].table_id
@@ -476,6 +506,25 @@ def _to_meal(value: object) -> Meal | None:
         return Meal.LUNCH
     if value == Meal.DINNER.value:
         return Meal.DINNER
-    if value == Meal.CANCELLED.value:
-        return Meal.CANCELLED
+    if isinstance(value, list) and value:
+        return _to_meal(value[0])
     return None
+
+
+def _to_checkbox(value: object, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return int(value) != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "0", "no", "n", "off", ""}:
+            return False
+        return default
+    if isinstance(value, list) and value:
+        return _to_checkbox(value[0], default=default)
+    return default

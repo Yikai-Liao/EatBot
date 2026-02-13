@@ -146,14 +146,24 @@ class BookingService:
     def _send_card_to_user(self, *, user: UserProfile, target_date: date, allowed_meals: set[Meal]) -> None:
         defaults = user.meal_preferences & allowed_meals
         meal_prices: dict[Meal, Decimal] = {}
-        meal_record_ids: dict[Meal, str | None] = {meal: None for meal in allowed_meals}
 
         if Meal.LUNCH in allowed_meals:
             meal_prices[Meal.LUNCH] = user.lunch_price
         if Meal.DINNER in allowed_meals:
             meal_prices[Meal.DINNER] = user.dinner_price
 
+        selected, meal_record_ids = self._resolve_selected_from_records(
+            target_date=target_date,
+            open_id=user.open_id,
+            allowed_meals=allowed_meals,
+        )
         for meal in defaults:
+            if meal_record_ids.get(meal) is None:
+                selected.add(meal)
+
+        for meal in selected:
+            if meal_record_ids.get(meal) is not None:
+                continue
             price = meal_prices.get(meal, Decimal("0"))
             record_id = self._repository.upsert_meal_record(
                 target_date=target_date,
@@ -168,7 +178,7 @@ class BookingService:
             user_open_id=user.open_id,
             allowed_meals=allowed_meals,
             default_meals=defaults,
-            selected_meals=defaults,
+            selected_meals=selected,
             meal_prices=meal_prices,
             meal_record_ids=meal_record_ids,
         )
@@ -217,7 +227,10 @@ class BookingService:
                 return ("error", "无可预约餐次", None)
 
             defaults = parse_meals(action_value.get("default_meals", [])) & allowed
-            selected = parse_meals(action_value.get("selected_meals", []))
+            selected_before = parse_meals(action_value.get("selected_meals", [])) & allowed
+            selected = set(selected_before)
+            meal_prices = _parse_meal_price_map(action_value.get("meal_prices"), allowed)
+            meal_record_ids = _parse_meal_record_id_map(action_value.get("meal_record_ids"), allowed)
             if action_name == "toggle_meal":
                 toggle = _parse_meal(action_value.get("toggle_meal"))
                 if toggle is None or toggle not in allowed:
@@ -229,18 +242,43 @@ class BookingService:
             elif action_name == "submit_reservation":
                 if not selected:
                     selected = parse_meals(form_value.get("meals"))
+            elif action_name == "refresh_state":
+                selected, refreshed_record_ids = self._resolve_selected_from_records(
+                    target_date=target_date,
+                    open_id=operator_open_id,
+                    allowed_meals=allowed,
+                )
+                _mark("parse_and_validate")
+                _mark("apply_selection")
+
+                card_payload = self._card_builder.build_payload(
+                    target_date=target_date,
+                    user_open_id=operator_open_id,
+                    allowed_meals=allowed,
+                    default_meals=defaults,
+                    selected_meals=selected,
+                    meal_prices=meal_prices,
+                    meal_record_ids=refreshed_record_ids,
+                )
+                _mark("build_card")
+                return ("info", "已刷新最新预约状态", card_payload)
             else:
                 return ("error", "不支持的卡片操作", None)
 
             selected &= allowed
-            meal_prices = _parse_meal_price_map(action_value.get("meal_prices"), allowed)
-            meal_record_ids = _parse_meal_record_id_map(action_value.get("meal_record_ids"), allowed)
+            changed_meals = {meal for meal in allowed if (meal in selected_before) != (meal in selected)}
+            meal_record_ids = self._fill_missing_record_ids(
+                target_date=target_date,
+                open_id=operator_open_id,
+                meals=changed_meals,
+                meal_record_ids=meal_record_ids,
+            )
             _mark("parse_and_validate")
 
             updated_record_ids = self._apply_selection(
                 target_date=target_date,
                 operator_open_id=operator_open_id,
-                allowed=allowed,
+                changed_meals=changed_meals,
                 selected=selected,
                 meal_prices=meal_prices,
                 meal_record_ids=meal_record_ids,
@@ -275,7 +313,7 @@ class BookingService:
         *,
         target_date: date,
         operator_open_id: str,
-        allowed: set[Meal],
+        changed_meals: set[Meal],
         selected: set[Meal],
         meal_prices: dict[Meal, Decimal],
         meal_record_ids: dict[Meal, str | None],
@@ -283,7 +321,7 @@ class BookingService:
         started_at = mono_time.monotonic()
         updated_record_ids = dict(meal_record_ids)
         cutoff_started = mono_time.monotonic()
-        for meal in allowed:
+        for meal in changed_meals:
             if not self._is_editable(target_date=target_date, meal=meal):
                 raise ValueError(f"{meal.value} 已过截止时间")
         cutoff_cost = int((mono_time.monotonic() - cutoff_started) * 1000)
@@ -291,7 +329,7 @@ class BookingService:
         write_started = mono_time.monotonic()
         upsert_count = 0
         cancel_count = 0
-        for meal in allowed:
+        for meal in changed_meals:
             record_id = updated_record_ids.get(meal)
             if meal in selected:
                 price = meal_prices.get(meal)
@@ -339,9 +377,10 @@ class BookingService:
         write_cost = int((mono_time.monotonic() - write_started) * 1000)
         total_cost = int((mono_time.monotonic() - started_at) * 1000)
         logger.info(
-            "预约写入分段耗时: date=%s open_id=%s cutoff=%dms write=%dms upsert=%d cancel=%d total=%dms",
+            "预约写入分段耗时: date=%s open_id=%s changed=%d cutoff=%dms write=%dms upsert=%d cancel=%d total=%dms",
             target_date.isoformat(),
             operator_open_id,
+            len(changed_meals),
             cutoff_cost,
             write_cost,
             upsert_count,
@@ -349,6 +388,48 @@ class BookingService:
             total_cost,
         )
         return updated_record_ids
+
+    def _fill_missing_record_ids(
+        self,
+        *,
+        target_date: date,
+        open_id: str,
+        meals: set[Meal],
+        meal_record_ids: dict[Meal, str | None],
+    ) -> dict[Meal, str | None]:
+        missing_meals = {meal for meal in meals if meal_record_ids.get(meal) is None}
+        if not missing_meals:
+            return meal_record_ids
+
+        rows = self._repository.list_user_meal_rows(target_date=target_date, open_id=open_id)
+        row_by_meal = _pick_rows_by_meal(rows=rows, allowed_meals=missing_meals)
+        updated = dict(meal_record_ids)
+        for meal in missing_meals:
+            row = row_by_meal.get(meal)
+            if row is None:
+                continue
+            updated[meal] = row.record_id
+        return updated
+
+    def _resolve_selected_from_records(
+        self,
+        *,
+        target_date: date,
+        open_id: str,
+        allowed_meals: set[Meal],
+    ) -> tuple[set[Meal], dict[Meal, str | None]]:
+        rows = self._repository.list_user_meal_rows(target_date=target_date, open_id=open_id)
+        row_by_meal = _pick_rows_by_meal(rows=rows, allowed_meals=allowed_meals)
+        selected: set[Meal] = set()
+        meal_record_ids: dict[Meal, str | None] = {meal: None for meal in allowed_meals}
+        for meal in allowed_meals:
+            row = row_by_meal.get(meal)
+            if row is None:
+                continue
+            meal_record_ids[meal] = row.record_id
+            if row.reservation_status:
+                selected.add(meal)
+        return selected, meal_record_ids
 
     def _load_user(self, open_id: str) -> UserProfile | None:
         users = self._repository.list_user_profiles()
@@ -458,3 +539,18 @@ def _parse_meal_record_id_map(value: object, allowed: set[Meal]) -> dict[Meal, s
         text = str(raw).strip()
         result[meal] = text or None
     return result
+
+
+def _pick_rows_by_meal(rows: list[Any], allowed_meals: set[Meal]) -> dict[Meal, Any]:
+    selected: dict[Meal, Any] = {}
+    for row in rows:
+        meal = getattr(row, "meal_type", None)
+        if meal not in allowed_meals:
+            continue
+        existing = selected.get(meal)
+        if existing is None:
+            selected[meal] = row
+            continue
+        if not bool(getattr(existing, "reservation_status", False)) and bool(getattr(row, "reservation_status", False)):
+            selected[meal] = row
+    return selected

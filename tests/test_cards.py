@@ -33,17 +33,23 @@ class CardBuilderTests(unittest.TestCase):
         self.assertIn("\n", text)
         self.assertNotIn("\\n", text)
         buttons = [item for item in elements if item.get("tag") == "button"]
-        self.assertEqual(len(buttons), 2)
-        self.assertEqual(buttons[0]["text"]["content"], "午餐")
-        self.assertEqual(buttons[0]["type"], "primary")
-        self.assertEqual(buttons[1]["text"]["content"], "晚餐")
-        self.assertEqual(buttons[1]["type"], "default")
+        self.assertEqual(len(buttons), 3)
+        meal_buttons = [button for button in buttons if button["text"]["content"] in {"午餐", "晚餐"}]
+        self.assertEqual(len(meal_buttons), 2)
+        self.assertEqual(meal_buttons[0]["text"]["content"], "午餐")
+        self.assertEqual(meal_buttons[0]["type"], "primary")
+        self.assertEqual(meal_buttons[1]["text"]["content"], "晚餐")
+        self.assertEqual(meal_buttons[1]["type"], "default")
+        refresh_buttons = [button for button in buttons if button["text"]["content"] == "刷新"]
+        self.assertEqual(len(refresh_buttons), 1)
+        self.assertEqual(refresh_buttons[0]["type"], "default")
         for button in buttons:
             self.assertIn("behaviors", button)
             self.assertEqual(button["behaviors"][0]["type"], "callback")
             value = button["behaviors"][0]["value"]
             self.assertIn("meal_prices", value)
             self.assertIn("meal_record_ids", value)
+        self.assertEqual(refresh_buttons[0]["behaviors"][0]["value"]["action"], "refresh_state")
 
 
 if __name__ == "__main__":
