@@ -46,6 +46,6 @@ timezone = "Asia/Shanghai"
 # 每日发卡时间（HH:MM）
 send_time = "09:00"
 # 午餐截止时间（HH:MM）
-lunch_cutoff = "10:30"
+lunch_cutoff = "10:00"
 # 晚餐截止时间（HH:MM）
-dinner_cutoff = "16:30"
+dinner_cutoff = "16:00"
