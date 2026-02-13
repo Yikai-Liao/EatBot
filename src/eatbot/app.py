@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import date, datetime
 import logging
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -25,10 +26,17 @@ logger = logging.getLogger(__name__)
 
 
 class EatBotApplication:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        now_provider: Callable[[], datetime] | None = None,
+        test_mode: bool = False,
+    ) -> None:
         self._config = None
         self._booking: BookingService | None = None
         self._scheduler: BackgroundScheduler | None = None
+        self._now_provider = now_provider
+        self._test_mode = test_mode
 
     def bootstrap(self) -> None:
         self._config = load_runtime_config()
@@ -39,7 +47,12 @@ class EatBotApplication:
 
         repository = BitableRepository(config=self._config, bitable=bitable, mappings=mappings)
         im = IMAdapter(client)
-        self._booking = BookingService(config=self._config, repository=repository, im=im)
+        self._booking = BookingService(
+            config=self._config,
+            repository=repository,
+            im=im,
+            now_provider=self._now_provider,
+        )
 
         logger.info("配置与字段映射校验通过")
 
@@ -47,7 +60,10 @@ class EatBotApplication:
         if self._config is None or self._booking is None:
             raise RuntimeError("应用未初始化")
 
-        self._start_scheduler()
+        if self._test_mode:
+            logger.warning("测试模式: 已禁用定时任务，仅保留长连接联调")
+        else:
+            self._start_scheduler()
 
         handler = (
             lark.EventDispatcherHandler.builder("", "")
@@ -66,10 +82,10 @@ class EatBotApplication:
         logger.info("长连接已启动")
         ws_client.start()
 
-    def send_today_once(self) -> None:
+    def send_once(self, target_date: date | None = None) -> None:
         if self._booking is None:
             raise RuntimeError("应用未初始化")
-        self._booking.send_daily_cards()
+        self._booking.send_daily_cards(target_date=target_date)
 
     def _start_scheduler(self) -> None:
         if self._config is None or self._booking is None:
@@ -143,7 +159,11 @@ class EatBotApplication:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="EatBot")
     parser.add_argument("--check", action="store_true", help="仅做配置和字段映射校验")
-    parser.add_argument("--send-today", action="store_true", help="立即发送今天的预约卡片后退出")
+    send_group = parser.add_mutually_exclusive_group()
+    send_group.add_argument("--send-today", action="store_true", help="立即发送今天的预约卡片后退出")
+    send_group.add_argument("--send-date", help="立即发送指定日期的预约卡片后退出，格式 YYYY-MM-DD")
+    parser.add_argument("--test-mode", action="store_true", help="启用测试模式，可配合 --test-now 注入虚拟当前时间")
+    parser.add_argument("--test-now", help="测试模式虚拟时间，格式 YYYY-MM-DDTHH:MM")
     return parser
 
 
@@ -159,7 +179,22 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    app = EatBotApplication()
+    now_provider: Callable[[], datetime] | None = None
+    if args.test_now:
+        try:
+            fake_now = datetime.strptime(args.test_now, "%Y-%m-%dT%H:%M")
+        except ValueError as exc:
+            logger.error("--test-now 格式错误，需为 YYYY-MM-DDTHH:MM")
+            raise SystemExit(1) from exc
+        now_provider = lambda: fake_now
+        args.test_mode = True
+
+    if args.test_mode:
+        logger.warning("测试模式已启用")
+        if args.test_now:
+            logger.warning("测试模式虚拟时间: %s", args.test_now)
+
+    app = EatBotApplication(now_provider=now_provider, test_mode=args.test_mode)
     try:
         app.bootstrap()
     except ConfigError as exc:
@@ -170,8 +205,18 @@ def main() -> None:
         logger.info("校验成功")
         return
 
+    if args.send_date:
+        try:
+            target_date = datetime.strptime(args.send_date, "%Y-%m-%d").date()
+        except ValueError as exc:
+            logger.error("--send-date 格式错误，需为 YYYY-MM-DD")
+            raise SystemExit(1) from exc
+        app.send_once(target_date=target_date)
+        logger.info("指定日期卡片发送完成: %s", args.send_date)
+        return
+
     if args.send_today:
-        app.send_today_once()
+        app.send_once()
         logger.info("今日卡片发送完成")
         return
 

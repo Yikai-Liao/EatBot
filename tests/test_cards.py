@@ -26,6 +26,9 @@ class CardBuilderTests(unittest.TestCase):
         card = json.loads(card_json)
         self.assertEqual(card["schema"], "2.0")
         elements = card["body"]["elements"]
+        text = elements[0]["content"]
+        self.assertIn("\n", text)
+        self.assertNotIn("\\n", text)
         buttons = [item for item in elements if item.get("tag") == "button"]
         self.assertEqual(len(buttons), 2)
         self.assertEqual(buttons[0]["text"]["content"], "午餐")

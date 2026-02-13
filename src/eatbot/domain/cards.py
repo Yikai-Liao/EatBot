@@ -67,8 +67,8 @@ class ReservationCardBuilder:
                     {
                         "tag": "markdown",
                         "content": (
-                            "点击按钮切换餐次并立即保存。\\n"
-                            f"默认偏好：{default_text}\\n"
+                            "点击按钮切换餐次并立即保存。\n"
+                            f"默认偏好：{default_text}\n"
                             f"当前选择：{selected_text}"
                         ),
                     },

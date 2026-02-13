@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 import sys
@@ -318,6 +318,66 @@ class BookingServiceMockTests(unittest.TestCase):
         self.service.send_card_to_user_today("ou_missing")
 
         self.im.send_text.assert_called_once_with("ou_missing", "你不在用餐人员配置中，无法发起预约。")
+
+    def test_handle_card_action_rejects_when_after_cutoff_with_simulated_now(self) -> None:
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            now_provider=lambda: datetime(2099, 1, 1, 21, 0),
+        )
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                action=SimpleNamespace(
+                    value={
+                        "action": "toggle_meal",
+                        "target_date": "2099-01-01",
+                        "target_open_id": "ou_sender",
+                        "allowed_meals": ["午餐"],
+                        "selected_meals": [],
+                        "toggle_meal": "午餐",
+                    },
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+
+        self.assertEqual(response.toast.type, "error")
+        self.assertIn("已过截止时间", response.toast.content)
+
+    def test_handle_card_action_accepts_when_before_cutoff_with_simulated_now(self) -> None:
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            now_provider=lambda: datetime(2099, 1, 1, 9, 0),
+        )
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                action=SimpleNamespace(
+                    value={
+                        "action": "toggle_meal",
+                        "target_date": "2099-01-01",
+                        "target_open_id": "ou_sender",
+                        "allowed_meals": ["午餐"],
+                        "selected_meals": [],
+                        "toggle_meal": "午餐",
+                    },
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+
+        self.assertEqual(response.toast.type, "info")
+        self.assertEqual(response.toast.content, "预约已更新")
 
 
 if __name__ == "__main__":

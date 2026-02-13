@@ -110,7 +110,13 @@
 ## 9. 运行方式
 - 配置校验：`uv run python main.py --check`
 - 单次发送今日卡片：`uv run python main.py --send-today`
+- 单次发送指定日期卡片：`uv run python main.py --send-date 2026-02-14`
 - 常驻运行（长连接 + 定时任务）：`uv run python main.py`
+- 测试模式（启用虚拟时间）：`uv run python main.py --test-mode --test-now 2026-02-13T09:00`
+- 测试模式说明：
+- `--test-mode` 会禁用进程内定时任务，仅保留长连接回调联调，避免误触发正式定时发送。
+- `--test-now` 用于模拟“当前时间”，可反复调整以验证截止前/截止后逻辑。
+- 不传 `--test-now` 时，截止判断仍使用真实系统时间。
 - 用户给机器人发 `订餐` 可触发给本人发今日预约卡片。
 - 真实环境联调手册：`docs/飞书真实环境联调手册.md`
 

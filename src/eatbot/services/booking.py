@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
@@ -31,6 +31,7 @@ class BookingService:
         config: RuntimeConfig,
         repository: BitableRepository,
         im: IMAdapter,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
         self._repository = repository
@@ -38,9 +39,10 @@ class BookingService:
         self._card_builder = ReservationCardBuilder()
         self._decider = MealPlanDecider()
         self._timezone = ZoneInfo(config.schedule.timezone)
+        self._now_provider = now_provider
 
     def send_daily_cards(self, target_date: date | None = None) -> None:
-        target = target_date or datetime.now(self._timezone).date()
+        target = target_date or self._now().date()
         rules = self._repository.list_schedule_rules()
         plan = self._decider.decide(target, rules)
         if not plan.meals:
@@ -55,7 +57,7 @@ class BookingService:
                 logger.exception("给用户发卡失败, user=%s, open_id=%s, err=%s", user.display_name, user.open_id, exc)
 
     def send_card_to_user_today(self, open_id: str) -> None:
-        today = datetime.now(self._timezone).date()
+        today = self._now().date()
         user = self._load_user(open_id)
         if user is None:
             self._im.send_text(open_id, "你不在用餐人员配置中，无法发起预约。")
@@ -259,7 +261,7 @@ class BookingService:
         return None
 
     def _is_editable(self, *, target_date: date, meal: Meal) -> bool:
-        now = datetime.now(self._timezone)
+        now = self._now()
         today = now.date()
 
         if target_date > today:
@@ -272,6 +274,15 @@ class BookingService:
         if meal == Meal.DINNER:
             return now.time() < self._config.schedule.dinner_cutoff_obj
         return False
+
+    def _now(self) -> datetime:
+        if self._now_provider is None:
+            return datetime.now(self._timezone)
+
+        now = self._now_provider()
+        if now.tzinfo is None:
+            return now.replace(tzinfo=self._timezone)
+        return now.astimezone(self._timezone)
 
     @staticmethod
     def _toast(
