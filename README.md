@@ -102,6 +102,8 @@
 
 ## 8. 技术方案
 - 事件接收：飞书长连接（WebSocket）模式。
+- `im.message.receive_v1`：使用 `asyncio` 协程调度异步处理，避免阻塞长连接主处理线程。
+- `card.action.trigger`：同步处理并在 3 秒内返回 `toast` / 更新后的卡片。
 - 消息发送：飞书 IM 新版卡片（JSON `schema=2.0`）。
 - 数据访问：Bitable OpenAPI（records / fields）。
 - 调度策略：进程内定时任务 + 截止时间判定。

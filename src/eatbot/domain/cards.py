@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 import json
 from typing import Any
 
@@ -18,6 +19,8 @@ class ReservationCardBuilder:
         allowed_meals: set[Meal],
         default_meals: set[Meal],
         selected_meals: set[Meal],
+        meal_prices: dict[Meal, Decimal],
+        meal_record_ids: dict[Meal, str | None],
     ) -> str:
         card = self.build_payload(
             target_date=target_date,
@@ -25,6 +28,8 @@ class ReservationCardBuilder:
             allowed_meals=allowed_meals,
             default_meals=default_meals,
             selected_meals=selected_meals,
+            meal_prices=meal_prices,
+            meal_record_ids=meal_record_ids,
         )
         return json.dumps(card, ensure_ascii=False)
 
@@ -36,6 +41,8 @@ class ReservationCardBuilder:
         allowed_meals: set[Meal],
         default_meals: set[Meal],
         selected_meals: set[Meal],
+        meal_prices: dict[Meal, Decimal],
+        meal_record_ids: dict[Meal, str | None],
     ) -> dict[str, Any]:
         allowed_sorted = self._sorted_meals(allowed_meals)
         defaults = default_meals & allowed_meals
@@ -48,6 +55,9 @@ class ReservationCardBuilder:
             user_open_id=user_open_id,
             allowed_meals=allowed_sorted,
             selected_meals=self._sorted_meals(selected),
+            default_meals=self._sorted_meals(defaults),
+            meal_prices=meal_prices,
+            meal_record_ids=meal_record_ids,
         )
 
         return {
@@ -87,9 +97,15 @@ def _build_toggle_buttons(
     user_open_id: str,
     allowed_meals: list[Meal],
     selected_meals: list[Meal],
+    default_meals: list[Meal],
+    meal_prices: dict[Meal, Decimal],
+    meal_record_ids: dict[Meal, str | None],
 ) -> list[dict[str, Any]]:
     selected_values = [meal.value for meal in selected_meals]
     allowed_values = [meal.value for meal in allowed_meals]
+    default_values = [meal.value for meal in default_meals]
+    meal_price_values = {meal.value: _decimal_to_string(meal_prices.get(meal)) for meal in allowed_meals}
+    meal_record_id_values = {meal.value: meal_record_ids.get(meal) for meal in allowed_meals}
 
     def payload(toggle: Meal) -> dict[str, Any]:
         return {
@@ -97,7 +113,10 @@ def _build_toggle_buttons(
             "target_date": target_date.isoformat(),
             "target_open_id": user_open_id,
             "allowed_meals": allowed_values,
+            "default_meals": default_values,
             "selected_meals": selected_values,
+            "meal_prices": meal_price_values,
+            "meal_record_ids": meal_record_id_values,
             "toggle_meal": toggle.value,
         }
 
@@ -113,3 +132,13 @@ def _build_toggle_buttons(
             }
         )
     return buttons
+
+
+def _decimal_to_string(value: Decimal | None) -> str:
+    if value is None:
+        return "0"
+    normalized = value.normalize()
+    text = format(normalized, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"

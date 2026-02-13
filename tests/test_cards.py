@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 import json
 from pathlib import Path
 import sys
@@ -21,6 +22,8 @@ class CardBuilderTests(unittest.TestCase):
             allowed_meals={Meal.LUNCH, Meal.DINNER},
             default_meals={Meal.LUNCH},
             selected_meals={Meal.LUNCH},
+            meal_prices={Meal.LUNCH: Decimal("20"), Meal.DINNER: Decimal("25")},
+            meal_record_ids={Meal.LUNCH: "rec_lunch", Meal.DINNER: None},
         )
 
         card = json.loads(card_json)
@@ -38,6 +41,9 @@ class CardBuilderTests(unittest.TestCase):
         for button in buttons:
             self.assertIn("behaviors", button)
             self.assertEqual(button["behaviors"][0]["type"], "callback")
+            value = button["behaviors"][0]["value"]
+            self.assertIn("meal_prices", value)
+            self.assertIn("meal_record_ids", value)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import argparse
 from datetime import date, datetime
 import logging
@@ -141,9 +142,16 @@ class EatBotApplication:
         if self._booking is None:
             return
         try:
-            self._booking.handle_message_event(data)
-        except Exception as exc:
-            logger.exception("处理消息事件失败: %s", exc)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                self._booking.handle_message_event(data)
+            except Exception as exc:
+                logger.exception("处理消息事件失败: %s", exc)
+            return
+
+        task = loop.create_task(self._handle_message_event_async(data))
+        task.add_done_callback(self._on_message_done)
 
     def _on_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         if self._booking is None:
@@ -154,6 +162,18 @@ class EatBotApplication:
         if self._booking is None:
             return {"toast": {"type": "error", "content": "服务未初始化"}}
         return self._booking.handle_card_frame_action(data)
+
+    async def _handle_message_event_async(self, data: P2ImMessageReceiveV1) -> None:
+        if self._booking is None:
+            return
+        await asyncio.to_thread(self._booking.handle_message_event, data)
+
+    @staticmethod
+    def _on_message_done(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except Exception as exc:
+            logger.exception("异步处理消息事件失败: %s", exc)
 
 
 def build_parser() -> argparse.ArgumentParser:

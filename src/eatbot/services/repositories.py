@@ -3,13 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
+import logging
+import time as mono_time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from eatbot.adapters.feishu_clients import BitableAdapter, TableFieldMapping
+from eatbot.adapters.feishu_clients import BitableAdapter, FeishuApiError, TableFieldMapping
 from eatbot.config import RuntimeConfig
 from eatbot.domain.decision import parse_meals
 from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -109,28 +114,166 @@ class BitableRepository:
             open_ids.append(open_id)
         return open_ids
 
-    def upsert_meal_record(self, *, target_date: date, open_id: str, meal: Meal, price: Decimal) -> None:
-        rows = self._list_meal_rows(target_date=target_date, open_id=open_id)
-        match = next((row for row in rows if row.meal_type == meal), None)
+    def upsert_meal_record(
+        self,
+        *,
+        target_date: date,
+        open_id: str,
+        meal: Meal,
+        price: Decimal,
+        record_id: str | None = None,
+        prefer_direct: bool = False,
+    ) -> str:
+        started_at = mono_time.monotonic()
         payload = self._meal_payload(target_date=target_date, open_id=open_id, meal=meal, price=price)
-
         table_id = self._table_id("meal_record")
+
+        if prefer_direct:
+            if record_id:
+                update_started = mono_time.monotonic()
+                try:
+                    self._bitable.update_record(table_id=table_id, record_id=record_id, fields=payload)
+                    logger.info(
+                        "meal_record.upsert: mode=direct_update date=%s meal=%s cost=%dms",
+                        target_date.isoformat(),
+                        meal.value,
+                        int((mono_time.monotonic() - update_started) * 1000),
+                    )
+                    return record_id
+                except FeishuApiError:
+                    logger.warning(
+                        "meal_record.upsert: direct_update 失败, fallback=create date=%s meal=%s",
+                        target_date.isoformat(),
+                        meal.value,
+                    )
+            create_started = mono_time.monotonic()
+            created = self._bitable.create_record(table_id=table_id, fields=payload)
+            logger.info(
+                "meal_record.upsert: mode=direct_create date=%s meal=%s write=%dms total=%dms",
+                target_date.isoformat(),
+                meal.value,
+                int((mono_time.monotonic() - create_started) * 1000),
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
+            return created.record_id
+
+        if record_id:
+            update_started = mono_time.monotonic()
+            try:
+                self._bitable.update_record(table_id=table_id, record_id=record_id, fields=payload)
+                logger.info(
+                    "meal_record.upsert: mode=update_by_hint date=%s meal=%s write=%dms total=%dms",
+                    target_date.isoformat(),
+                    meal.value,
+                    int((mono_time.monotonic() - update_started) * 1000),
+                    int((mono_time.monotonic() - started_at) * 1000),
+                )
+                return record_id
+            except FeishuApiError:
+                logger.warning(
+                    "meal_record.upsert: update_by_hint 失败, fallback=scan date=%s meal=%s",
+                    target_date.isoformat(),
+                    meal.value,
+                )
+
+        scan_started = mono_time.monotonic()
+        rows = self._list_meal_rows(target_date=target_date, open_id=open_id)
+        scan_cost = int((mono_time.monotonic() - scan_started) * 1000)
+        match = next((row for row in rows if row.meal_type == meal), None)
         if match:
+            write_started = mono_time.monotonic()
             self._bitable.update_record(table_id=table_id, record_id=match.record_id, fields=payload)
-            return
+            logger.info(
+                "meal_record.upsert: mode=scan_update date=%s meal=%s scan=%dms write=%dms total=%dms",
+                target_date.isoformat(),
+                meal.value,
+                scan_cost,
+                int((mono_time.monotonic() - write_started) * 1000),
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
+            return match.record_id
 
         cancelled = next((row for row in rows if row.meal_type == Meal.CANCELLED), None)
         if cancelled:
+            write_started = mono_time.monotonic()
             self._bitable.update_record(table_id=table_id, record_id=cancelled.record_id, fields=payload)
-            return
+            logger.info(
+                "meal_record.upsert: mode=scan_reuse_cancelled date=%s meal=%s scan=%dms write=%dms total=%dms",
+                target_date.isoformat(),
+                meal.value,
+                scan_cost,
+                int((mono_time.monotonic() - write_started) * 1000),
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
+            return cancelled.record_id
 
-        self._bitable.create_record(table_id=table_id, fields=payload)
+        write_started = mono_time.monotonic()
+        created = self._bitable.create_record(table_id=table_id, fields=payload)
+        logger.info(
+            "meal_record.upsert: mode=scan_create date=%s meal=%s scan=%dms write=%dms total=%dms",
+            target_date.isoformat(),
+            meal.value,
+            scan_cost,
+            int((mono_time.monotonic() - write_started) * 1000),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
+        return created.record_id
 
-    def cancel_meal_record(self, *, target_date: date, open_id: str, meal: Meal) -> None:
+    def cancel_meal_record(
+        self,
+        *,
+        target_date: date,
+        open_id: str,
+        meal: Meal,
+        record_id: str | None = None,
+        prefer_direct: bool = False,
+    ) -> str | None:
+        started_at = mono_time.monotonic()
+        if prefer_direct:
+            if not record_id:
+                logger.info(
+                    "meal_record.cancel: mode=direct_skip date=%s meal=%s total=%dms",
+                    target_date.isoformat(),
+                    meal.value,
+                    int((mono_time.monotonic() - started_at) * 1000),
+                )
+                return None
+            payload = self._meal_payload(
+                target_date=target_date,
+                open_id=open_id,
+                meal=Meal.CANCELLED,
+                price=Decimal("0"),
+            )
+            write_started = mono_time.monotonic()
+            try:
+                self._bitable.update_record(
+                    table_id=self._table_id("meal_record"),
+                    record_id=record_id,
+                    fields=payload,
+                )
+            except FeishuApiError:
+                logger.warning(
+                    "meal_record.cancel: direct_update 失败, record_id=%s date=%s meal=%s",
+                    record_id,
+                    target_date.isoformat(),
+                    meal.value,
+                )
+                return None
+            logger.info(
+                "meal_record.cancel: mode=direct_update date=%s meal=%s write=%dms total=%dms",
+                target_date.isoformat(),
+                meal.value,
+                int((mono_time.monotonic() - write_started) * 1000),
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
+            return record_id
+
+        scan_started = mono_time.monotonic()
         rows = self._list_meal_rows(target_date=target_date, open_id=open_id)
+        scan_cost = int((mono_time.monotonic() - scan_started) * 1000)
         match = next((row for row in rows if row.meal_type == meal), None)
-        if not match:
-            return
+        if not match and record_id:
+            match = next((row for row in rows if row.record_id == record_id), None)
 
         payload = self._meal_payload(
             target_date=target_date,
@@ -138,11 +281,57 @@ class BitableRepository:
             meal=Meal.CANCELLED,
             price=Decimal("0"),
         )
+        if match is None:
+            if not record_id:
+                logger.info(
+                    "meal_record.cancel: mode=scan_skip date=%s meal=%s scan=%dms total=%dms",
+                    target_date.isoformat(),
+                    meal.value,
+                    scan_cost,
+                    int((mono_time.monotonic() - started_at) * 1000),
+                )
+                return None
+            write_started = mono_time.monotonic()
+            try:
+                self._bitable.update_record(
+                    table_id=self._table_id("meal_record"),
+                    record_id=record_id,
+                    fields=payload,
+                )
+            except FeishuApiError:
+                logger.warning(
+                    "meal_record.cancel: scan_fallback_update 失败, record_id=%s date=%s meal=%s",
+                    record_id,
+                    target_date.isoformat(),
+                    meal.value,
+                )
+                return None
+            logger.info(
+                "meal_record.cancel: mode=scan_fallback_update date=%s meal=%s scan=%dms write=%dms total=%dms",
+                target_date.isoformat(),
+                meal.value,
+                scan_cost,
+                int((mono_time.monotonic() - write_started) * 1000),
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
+            return record_id
+
+        target_record_id = record_id or match.record_id
+        write_started = mono_time.monotonic()
         self._bitable.update_record(
             table_id=self._table_id("meal_record"),
-            record_id=match.record_id,
+            record_id=target_record_id,
             fields=payload,
         )
+        logger.info(
+            "meal_record.cancel: mode=scan_update date=%s meal=%s scan=%dms write=%dms total=%dms",
+            target_date.isoformat(),
+            meal.value,
+            scan_cost,
+            int((mono_time.monotonic() - write_started) * 1000),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
+        return target_record_id
 
     def count_meal_records(self, *, target_date: date, meal: Meal) -> int:
         rows = self._list_meal_rows(target_date=target_date, open_id=None)
@@ -191,7 +380,6 @@ class BitableRepository:
     def _table_fields(self, table_alias: str) -> dict[str, str]:
         mapping = self._mappings[table_alias].by_logical_key
         return {logical_key: meta.field_name for logical_key, meta in mapping.items()}
-
 
 def _extract_open_id(value: object) -> str | None:
     if not isinstance(value, list) or not value:

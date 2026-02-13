@@ -67,9 +67,35 @@ def make_user(open_id: str = "ou_test", enabled: bool = True) -> UserProfile:
     )
 
 
+def build_action_value(
+    *,
+    action: str,
+    target_open_id: str,
+    allowed_meals: list[str],
+    default_meals: list[str],
+    selected_meals: list[str],
+    toggle_meal: str | None = None,
+    meal_record_ids: dict[str, str | None] | None = None,
+) -> dict:
+    value = {
+        "action": action,
+        "target_date": "2099-01-01",
+        "target_open_id": target_open_id,
+        "allowed_meals": allowed_meals,
+        "default_meals": default_meals,
+        "selected_meals": selected_meals,
+        "meal_prices": {"午餐": "20", "晚餐": "25"},
+        "meal_record_ids": meal_record_ids or {"午餐": None, "晚餐": None},
+    }
+    if toggle_meal is not None:
+        value["toggle_meal"] = toggle_meal
+    return value
+
+
 class BookingServiceMockTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = Mock()
+        self.repo.upsert_meal_record.return_value = "rec_default"
         self.im = Mock()
         self.service = BookingService(config=build_config(), repository=self.repo, im=self.im)
 
@@ -127,17 +153,16 @@ class BookingServiceMockTests(unittest.TestCase):
             mocked.assert_called_once_with("ou_sender")
 
     def test_handle_card_action_updates_and_cancels_records(self) -> None:
-        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
-
         data = SimpleNamespace(
             event=SimpleNamespace(
                 action=SimpleNamespace(
-                    value={
-                        "action": "submit_reservation",
-                        "target_date": "2099-01-01",
-                        "target_open_id": "ou_sender",
-                        "allowed_meals": ["午餐", "晚餐"],
-                    },
+                    value=build_action_value(
+                        action="submit_reservation",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=[],
+                    ),
                     form_value={"meals": ["午餐"]},
                 ),
                 operator=SimpleNamespace(open_id="ou_sender"),
@@ -151,27 +176,30 @@ class BookingServiceMockTests(unittest.TestCase):
             open_id="ou_sender",
             meal=Meal.LUNCH,
             price=Decimal("20"),
+            record_id=None,
+            prefer_direct=True,
         )
         self.repo.cancel_meal_record.assert_called_once_with(
             target_date=date(2099, 1, 1),
             open_id="ou_sender",
             meal=Meal.DINNER,
+            record_id=None,
+            prefer_direct=True,
         )
         self.assertEqual(response.toast.type, "info")
         self.assertEqual(response.toast.content, "预约已更新")
 
     def test_handle_card_action_selected_meals_from_action_value(self) -> None:
-        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
         data = SimpleNamespace(
             event=SimpleNamespace(
                 action=SimpleNamespace(
-                    value={
-                        "action": "submit_reservation",
-                        "target_date": "2099-01-01",
-                        "target_open_id": "ou_sender",
-                        "allowed_meals": ["午餐", "晚餐"],
-                        "selected_meals": ["晚餐"],
-                    },
+                    value=build_action_value(
+                        action="submit_reservation",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["晚餐"],
+                    ),
                     form_value={},
                 ),
                 operator=SimpleNamespace(open_id="ou_sender"),
@@ -185,26 +213,31 @@ class BookingServiceMockTests(unittest.TestCase):
             open_id="ou_sender",
             meal=Meal.DINNER,
             price=Decimal("25"),
+            record_id=None,
+            prefer_direct=True,
         )
         self.repo.cancel_meal_record.assert_called_once_with(
             target_date=date(2099, 1, 1),
             open_id="ou_sender",
             meal=Meal.LUNCH,
+            record_id=None,
+            prefer_direct=True,
         )
 
     def test_handle_card_action_toggle_meal_updates_and_returns_raw_card(self) -> None:
-        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
+        self.repo.upsert_meal_record.side_effect = ["rec_lunch", "rec_dinner"]
         data = SimpleNamespace(
             event=SimpleNamespace(
                 action=SimpleNamespace(
-                    value={
-                        "action": "toggle_meal",
-                        "target_date": "2099-01-01",
-                        "target_open_id": "ou_sender",
-                        "allowed_meals": ["午餐", "晚餐"],
-                        "selected_meals": ["午餐"],
-                        "toggle_meal": "晚餐",
-                    },
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["午餐"],
+                        toggle_meal="晚餐",
+                        meal_record_ids={"午餐": "rec_lunch", "晚餐": None},
+                    ),
                     form_value={},
                 ),
                 operator=SimpleNamespace(open_id="ou_sender"),
@@ -220,12 +253,16 @@ class BookingServiceMockTests(unittest.TestCase):
                     open_id="ou_sender",
                     meal=Meal.LUNCH,
                     price=Decimal("20"),
+                    record_id="rec_lunch",
+                    prefer_direct=True,
                 ),
                 call(
                     target_date=date(2099, 1, 1),
                     open_id="ou_sender",
                     meal=Meal.DINNER,
                     price=Decimal("25"),
+                    record_id=None,
+                    prefer_direct=True,
                 ),
             ],
             any_order=True,
@@ -238,18 +275,18 @@ class BookingServiceMockTests(unittest.TestCase):
         self.assertTrue(all(button["type"] == "primary" for button in buttons))
 
     def test_handle_card_frame_action_works_for_card_message_type(self) -> None:
-        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
         data = SimpleNamespace(
             open_id="ou_sender",
             action=SimpleNamespace(
-                value={
-                    "action": "toggle_meal",
-                    "target_date": "2099-01-01",
-                    "target_open_id": "ou_sender",
-                    "allowed_meals": ["午餐", "晚餐"],
-                    "selected_meals": ["午餐"],
-                    "toggle_meal": "午餐",
-                },
+                value=build_action_value(
+                    action="toggle_meal",
+                    target_open_id="ou_sender",
+                    allowed_meals=["午餐", "晚餐"],
+                    default_meals=["午餐"],
+                    selected_meals=["午餐"],
+                    toggle_meal="午餐",
+                    meal_record_ids={"午餐": "rec_lunch", "晚餐": None},
+                ),
                 form_value={},
             ),
         )
@@ -262,11 +299,15 @@ class BookingServiceMockTests(unittest.TestCase):
                     target_date=date(2099, 1, 1),
                     open_id="ou_sender",
                     meal=Meal.LUNCH,
+                    record_id="rec_lunch",
+                    prefer_direct=True,
                 ),
                 call(
                     target_date=date(2099, 1, 1),
                     open_id="ou_sender",
                     meal=Meal.DINNER,
+                    record_id=None,
+                    prefer_direct=True,
                 ),
             ],
             any_order=True,
@@ -275,16 +316,16 @@ class BookingServiceMockTests(unittest.TestCase):
         self.assertEqual(response["card"]["type"], "raw")
 
     def test_handle_card_action_rejects_operator_mismatch(self) -> None:
-        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_user")]
         data = SimpleNamespace(
             event=SimpleNamespace(
                 action=SimpleNamespace(
-                    value={
-                        "action": "submit_reservation",
-                        "target_date": "2099-01-01",
-                        "target_open_id": "ou_user",
-                        "allowed_meals": ["午餐"],
-                    },
+                    value=build_action_value(
+                        action="submit_reservation",
+                        target_open_id="ou_user",
+                        allowed_meals=["午餐"],
+                        default_meals=[],
+                        selected_meals=["午餐"],
+                    ),
                     form_value={"meals": ["午餐"]},
                 ),
                 operator=SimpleNamespace(open_id="ou_other"),
@@ -326,18 +367,18 @@ class BookingServiceMockTests(unittest.TestCase):
             im=self.im,
             now_provider=lambda: datetime(2099, 1, 1, 21, 0),
         )
-        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
         data = SimpleNamespace(
             event=SimpleNamespace(
                 action=SimpleNamespace(
-                    value={
-                        "action": "toggle_meal",
-                        "target_date": "2099-01-01",
-                        "target_open_id": "ou_sender",
-                        "allowed_meals": ["午餐"],
-                        "selected_meals": [],
-                        "toggle_meal": "午餐",
-                    },
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐"],
+                        default_meals=[],
+                        selected_meals=[],
+                        toggle_meal="午餐",
+                        meal_record_ids={"午餐": None},
+                    ),
                     form_value={},
                 ),
                 operator=SimpleNamespace(open_id="ou_sender"),
@@ -356,18 +397,18 @@ class BookingServiceMockTests(unittest.TestCase):
             im=self.im,
             now_provider=lambda: datetime(2099, 1, 1, 9, 0),
         )
-        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
         data = SimpleNamespace(
             event=SimpleNamespace(
                 action=SimpleNamespace(
-                    value={
-                        "action": "toggle_meal",
-                        "target_date": "2099-01-01",
-                        "target_open_id": "ou_sender",
-                        "allowed_meals": ["午餐"],
-                        "selected_meals": [],
-                        "toggle_meal": "午餐",
-                    },
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐"],
+                        default_meals=[],
+                        selected_meals=[],
+                        toggle_meal="午餐",
+                        meal_record_ids={"午餐": None},
+                    ),
                     form_value={},
                 ),
                 operator=SimpleNamespace(open_id="ou_sender"),
