@@ -4,6 +4,7 @@ from datetime import time
 from pathlib import Path
 import tomllib
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -51,7 +52,6 @@ class FieldNamesConfig(BaseModel):
 
 
 class ScheduleConfig(BaseModel):
-    timezone: str = "Asia/Shanghai"
     send_time: str = "09:00"
     lunch_cutoff: str = "10:30"
     dinner_cutoff: str = "16:30"
@@ -102,11 +102,40 @@ class RuntimeConfig(BaseModel):
     app_id: str
     app_secret: str
     app_token: str
+    timezone: str = "Asia/Shanghai"
     wiki_token: str | None = None
     tables: TablesConfig
     field_names: FieldNamesConfig
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_schedule_timezone(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("timezone"):
+            return data
+        schedule = data.get("schedule")
+        if not isinstance(schedule, dict):
+            return data
+        legacy_timezone = schedule.get("timezone")
+        if not isinstance(legacy_timezone, str) or not legacy_timezone.strip():
+            return data
+        migrated = dict(data)
+        migrated["timezone"] = legacy_timezone
+        return migrated
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("timezone 不能为空")
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"timezone 无效: {value}") from exc
+        return value
 
     @model_validator(mode="after")
     def validate_unique_field_names(self) -> "RuntimeConfig":

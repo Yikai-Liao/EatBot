@@ -185,7 +185,7 @@ class EatBotApplication:
         if self._config is None or self._booking is None:
             raise RuntimeError("应用未初始化")
 
-        today = datetime.now(ZoneInfo(self._config.schedule.timezone)).date()
+        today = datetime.now(ZoneInfo(self._config.timezone)).date()
         target = target_date or today
         if meal is None:
             self._booking.send_stats(target, Meal.LUNCH)
@@ -197,7 +197,7 @@ class EatBotApplication:
         if self._config is None or self._booking is None:
             raise RuntimeError("应用未初始化")
 
-        localized_run_at = _to_schedule_timezone(run_at, self._config.schedule.timezone)
+        localized_run_at = _to_runtime_timezone(run_at, self._config.timezone)
         target_date = localized_run_at.date()
         if action == CronAction.SEND_CARDS:
             self._booking.send_daily_cards(target_date=target_date)
@@ -214,7 +214,7 @@ class EatBotApplication:
         if self._scheduler is not None:
             return
 
-        tz = ZoneInfo(self._config.schedule.timezone)
+        tz = ZoneInfo(self._config.timezone)
         scheduler = BackgroundScheduler(timezone=tz)
         for spec in build_cron_job_specs(self._config.schedule):
             scheduler.add_job(
@@ -240,7 +240,7 @@ class EatBotApplication:
     def _run_scheduled_action(self, action: CronAction) -> None:
         if self._config is None:
             raise RuntimeError("应用未初始化")
-        now = datetime.now(ZoneInfo(self._config.schedule.timezone))
+        now = datetime.now(ZoneInfo(self._config.timezone))
         self.execute_cron_action(action, run_at=now)
 
     def _on_message(self, data: P2ImMessageReceiveV1) -> None:
@@ -325,7 +325,7 @@ def _parse_cli_datetime(raw_value: str | None, option_name: str) -> datetime | N
         raise typer.BadParameter(f"{option_name} 格式错误，需为 YYYY-MM-DDTHH:MM") from exc
 
 
-def _to_schedule_timezone(target: datetime, timezone: str) -> datetime:
+def _to_runtime_timezone(target: datetime, timezone: str) -> datetime:
     tz = ZoneInfo(timezone)
     if target.tzinfo is None:
         return target.replace(tzinfo=tz)
@@ -468,8 +468,8 @@ def dev_cron_command(
     if parsed_from is None or parsed_to is None:
         raise typer.BadParameter("时间参数不能为空")
 
-    from_at = _to_schedule_timezone(parsed_from, runtime_config.schedule.timezone)
-    to_at = _to_schedule_timezone(parsed_to, runtime_config.schedule.timezone)
+    from_at = _to_runtime_timezone(parsed_from, runtime_config.timezone)
+    to_at = _to_runtime_timezone(parsed_to, runtime_config.timezone)
     if to_at < from_at:
         raise typer.BadParameter("--to 必须大于等于 --from")
 

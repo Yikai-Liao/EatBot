@@ -16,6 +16,8 @@ def test_card_uses_two_toggle_buttons_with_callback() -> None:
     builder = ReservationCardBuilder()
     card_json = builder.build(
         target_date=date(2026, 2, 13),
+        lunch_cutoff="10:30",
+        dinner_cutoff="16:30",
         user_open_id="ou_test",
         allowed_meals={Meal.LUNCH, Meal.DINNER},
         default_meals={Meal.LUNCH},
@@ -26,10 +28,10 @@ def test_card_uses_two_toggle_buttons_with_callback() -> None:
 
     card = json.loads(card_json)
     assert card["schema"] == "2.0"
+    assert card["header"]["title"]["content"] == "食堂预约 2026-02-13（周五）"
     elements = card["body"]["elements"]
     text = elements[0]["content"]
-    assert "\n" in text
-    assert "\\n" not in text
+    assert text == "点击按钮切换预约状态\n预约截止时间为：午餐10:30，晚餐16:30"
     buttons = [item for item in elements if item.get("tag") == "button"]
     assert len(buttons) == 3
     meal_buttons = [button for button in buttons if button["text"]["content"] in {"午餐", "晚餐"}]

@@ -74,9 +74,10 @@
 - `人员` `type=11`
 
 ## 5. 配置文件说明
-- `config.shared.toml`：可提交，保存 app_token、table_id、字段名映射。
-- `config.local.toml`：本地私密，保存 app_id、app_secret、日志本地落盘配置。
-- `config.shared.toml` 中 `schedule` 段用于配置发卡时间和午/晚餐截止时间。
+- `config.shared.toml`：可提交，保存全局时区、字段名映射、定时参数等共享配置。
+- `config.local.toml`：本地私密，保存 app_id、app_secret、app_token、wiki_token、tables 与日志配置。
+- `timezone`（根级）用于定义全局业务时区，表格日期解析、定时任务与统计口径都按该时区计算。
+- `config.shared.toml` 中 `schedule` 段仅用于配置发卡时间和午/晚餐截止时间。
 - 加载建议：先加载 `config.shared.toml`，再用 `config.local.toml` 覆盖。
 - `config.local.toml` 日志配置示例：
 ```toml
@@ -187,6 +188,7 @@ eatbot
 ### 9.6 补充说明
 - 用户给机器人发 `订餐` 可触发给本人发今日预约卡片。
 - 真实环境联调手册：`docs/飞书真实环境联调手册.md`
+- 开发计划与后续任务：`DEV.md`
 
 ## 10. 当前验证状态（2026-02-14）
 - 核心命令可用：`uv run eatbot --help`、`uv run eatbot run --help`。

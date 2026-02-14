@@ -378,8 +378,8 @@ class TestBookingServiceMock:
 
         self.im.send_text.assert_has_calls(
             [
-                call("ou_1", "2026-02-12 午餐 预约人数: 3"),
-                call("ou_2", "2026-02-12 午餐 预约人数: 3"),
+                call("ou_1", "2026-02-12 午餐 预约人数: 3（周四）"),
+                call("ou_2", "2026-02-12 午餐 预约人数: 3（周四）"),
             ]
         )
         assert self.im.send_text.call_count == 2

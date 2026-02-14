@@ -15,6 +15,8 @@ class ReservationCardBuilder:
         self,
         *,
         target_date: date,
+        lunch_cutoff: str,
+        dinner_cutoff: str,
         user_open_id: str,
         allowed_meals: set[Meal],
         default_meals: set[Meal],
@@ -24,6 +26,8 @@ class ReservationCardBuilder:
     ) -> str:
         card = self.build_payload(
             target_date=target_date,
+            lunch_cutoff=lunch_cutoff,
+            dinner_cutoff=dinner_cutoff,
             user_open_id=user_open_id,
             allowed_meals=allowed_meals,
             default_meals=default_meals,
@@ -37,6 +41,8 @@ class ReservationCardBuilder:
         self,
         *,
         target_date: date,
+        lunch_cutoff: str,
+        dinner_cutoff: str,
         user_open_id: str,
         allowed_meals: set[Meal],
         default_meals: set[Meal],
@@ -45,17 +51,14 @@ class ReservationCardBuilder:
         meal_record_ids: dict[Meal, str | None],
     ) -> dict[str, Any]:
         allowed_sorted = self._sorted_meals(allowed_meals)
-        defaults = default_meals & allowed_meals
         selected = selected_meals & allowed_meals
 
-        default_text = "、".join(meal.value for meal in self._sorted_meals(defaults)) or "无"
-        selected_text = "、".join(meal.value for meal in self._sorted_meals(selected)) or "无"
         buttons = _build_toggle_buttons(
             target_date=target_date,
             user_open_id=user_open_id,
             allowed_meals=allowed_sorted,
             selected_meals=self._sorted_meals(selected),
-            default_meals=self._sorted_meals(defaults),
+            default_meals=self._sorted_meals(default_meals & allowed_meals),
             meal_prices=meal_prices,
             meal_record_ids=meal_record_ids,
         )
@@ -67,7 +70,7 @@ class ReservationCardBuilder:
                 "template": "blue",
                 "title": {
                     "tag": "plain_text",
-                    "content": f"食堂预约 {target_date.isoformat()}",
+                    "content": f"食堂预约 {target_date.isoformat()}（{_weekday_text(target_date)}）",
                 },
             },
             "body": {
@@ -77,9 +80,8 @@ class ReservationCardBuilder:
                     {
                         "tag": "markdown",
                         "content": (
-                            "点击按钮切换餐次并立即保存。\n"
-                            f"默认偏好：{default_text}\n"
-                            f"当前选择：{selected_text}"
+                            "点击按钮切换预约状态\n"
+                            f"预约截止时间为：午餐{lunch_cutoff}，晚餐{dinner_cutoff}"
                         ),
                     },
                     *buttons,
@@ -161,3 +163,8 @@ def _decimal_to_string(value: Decimal | None) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text or "0"
+
+
+def _weekday_text(target_date: date) -> str:
+    weekdays = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    return weekdays[target_date.weekday()]

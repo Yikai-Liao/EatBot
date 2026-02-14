@@ -75,8 +75,9 @@ def test_parse_cli_date_argument_invalid() -> None:
 
 
 def test_list_cron_trigger_events_window_boundaries() -> None:
+    runtime_config = build_runtime_config()
     schedule = ScheduleConfig()
-    tz = ZoneInfo(schedule.timezone)
+    tz = ZoneInfo(runtime_config.timezone)
     start_at = datetime(2026, 2, 14, 9, 0, tzinfo=tz)
     end_at = datetime(2026, 2, 14, 10, 30, tzinfo=tz)
 

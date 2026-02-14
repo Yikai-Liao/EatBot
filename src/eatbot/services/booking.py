@@ -36,7 +36,7 @@ class BookingService:
         self._im = im
         self._card_builder = ReservationCardBuilder()
         self._decider = MealPlanDecider()
-        self._timezone = ZoneInfo(config.schedule.timezone)
+        self._timezone = ZoneInfo(config.timezone)
         self._now_provider = now_provider
 
     def send_daily_cards(self, target_date: date | None = None) -> None:
@@ -76,7 +76,7 @@ class BookingService:
             logger.info("无统计接收人配置，跳过统计发送")
             return
 
-        text = f"{target_date.isoformat()} {meal.value} 预约人数: {count}"
+        text = f"{target_date.isoformat()} {meal.value} 预约人数: {count}（{_weekday_text(target_date)}）"
         for open_id in receivers:
             self._im.send_text(open_id, text)
 
@@ -171,6 +171,8 @@ class BookingService:
 
         card_json = self._card_builder.build(
             target_date=target_date,
+            lunch_cutoff=self._config.schedule.lunch_cutoff,
+            dinner_cutoff=self._config.schedule.dinner_cutoff,
             user_open_id=user.open_id,
             allowed_meals=allowed_meals,
             default_meals=defaults,
@@ -249,6 +251,8 @@ class BookingService:
 
                 card_payload = self._card_builder.build_payload(
                     target_date=target_date,
+                    lunch_cutoff=self._config.schedule.lunch_cutoff,
+                    dinner_cutoff=self._config.schedule.dinner_cutoff,
                     user_open_id=operator_open_id,
                     allowed_meals=allowed,
                     default_meals=defaults,
@@ -283,6 +287,8 @@ class BookingService:
 
             card_payload = self._card_builder.build_payload(
                 target_date=target_date,
+                lunch_cutoff=self._config.schedule.lunch_cutoff,
+                dinner_cutoff=self._config.schedule.dinner_cutoff,
                 user_open_id=operator_open_id,
                 allowed_meals=allowed,
                 default_meals=defaults,
@@ -550,3 +556,8 @@ def _pick_rows_by_meal(rows: list[Any], allowed_meals: set[Meal]) -> dict[Meal, 
         if not bool(getattr(existing, "reservation_status", False)) and bool(getattr(row, "reservation_status", False)):
             selected[meal] = row
     return selected
+
+
+def _weekday_text(target_date: date) -> str:
+    weekdays = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    return weekdays[target_date.weekday()]

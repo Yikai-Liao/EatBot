@@ -33,7 +33,7 @@ class BitableRepository:
         self._config = config
         self._bitable = bitable
         self._mappings = mappings
-        self._timezone = ZoneInfo(config.schedule.timezone)
+        self._timezone = ZoneInfo(config.timezone)
 
     def list_user_profiles(self) -> list[UserProfile]:
         table_id = self._table_id("user_config")

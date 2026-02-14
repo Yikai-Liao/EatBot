@@ -1,18 +1,8 @@
 # 共享配置（可提交）
-# 仅放非敏感信息：表标识、字段名映射。
+# 仅放非敏感信息：全局时区、字段名映射、定时参数。
 
-# 多维表格 Base 标识（get_node 的 obj_token）
-app_token = "PFD8b1u0jaos9vsKavBcHC4EnTg"
-
-# Wiki 页面 token（来自 /wiki/{token}）
-wiki_token = "QC07wNez9iSgZhk6rg7cOW2PnNb"
-
-[tables]
-# 四张业务表 table_id（来自链接参数 table=...）
-user_config = "tblrulMIAx0vnkHu"
-meal_schedule = "tblUONtouxmxvVFq"
-meal_record = "tblBkttZl5XmmFFB"
-stats_receivers = "tbl6brK6FcgCynAm"
+# 业务时区（表格日期解析、定时任务、统计口径统一按此时区）
+timezone = "Asia/Shanghai"
 
 [field_names.user_config]
 # 逻辑字段名 -> 表中真实字段名
@@ -41,10 +31,8 @@ reservation_status = "预约状态"
 user = "人员"
 
 [schedule]
-# 时区
-timezone = "Asia/Shanghai"
 # 每日发卡时间（HH:MM）
-send_time = "09:00"
+send_time = "00:00"
 # 午餐截止时间（HH:MM）
 lunch_cutoff = "10:00"
 # 晚餐截止时间（HH:MM）
