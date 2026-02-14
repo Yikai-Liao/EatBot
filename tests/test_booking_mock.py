@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-import unittest
 from unittest.mock import Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -98,8 +97,8 @@ def build_action_value(
     return value
 
 
-class BookingServiceMockTests(unittest.TestCase):
-    def setUp(self) -> None:
+class TestBookingServiceMock:
+    def setup_method(self) -> None:
         self.repo = Mock()
         self.repo.upsert_meal_record.return_value = "rec_default"
         self.repo.list_user_meal_rows.return_value = []
@@ -138,8 +137,8 @@ class BookingServiceMockTests(unittest.TestCase):
             item for item in payload["body"]["elements"] if item.get("tag") == "button" and item["text"]["content"] in {"午餐", "晚餐"}
         ]
         status_by_meal = {item["text"]["content"]: item["type"] for item in meal_buttons}
-        self.assertEqual(status_by_meal["午餐"], "default")
-        self.assertEqual(status_by_meal["晚餐"], "primary")
+        assert status_by_meal["午餐"] == "default"
+        assert status_by_meal["晚餐"] == "primary"
 
     def test_send_daily_cards_continue_when_one_user_send_failed(self) -> None:
         self.repo.list_schedule_rules.return_value = []
@@ -151,7 +150,7 @@ class BookingServiceMockTests(unittest.TestCase):
 
         self.service.send_daily_cards(target_date=date(2026, 2, 12))
 
-        self.assertEqual(self.im.send_interactive.call_count, 2)
+        assert self.im.send_interactive.call_count == 2
         self.repo.upsert_meal_record.assert_has_calls(
             [
                 call(
@@ -208,8 +207,8 @@ class BookingServiceMockTests(unittest.TestCase):
             prefer_direct=True,
         )
         self.repo.cancel_meal_record.assert_not_called()
-        self.assertEqual(response.toast.type, "info")
-        self.assertEqual(response.toast.content, "预约已更新")
+        assert response.toast.type == "info"
+        assert response.toast.content == "预约已更新"
 
     def test_handle_card_action_selected_meals_from_action_value(self) -> None:
         data = SimpleNamespace(
@@ -270,14 +269,14 @@ class BookingServiceMockTests(unittest.TestCase):
             target_date=date(2099, 1, 1),
             open_id="ou_sender",
         )
-        self.assertEqual(response.toast.type, "info")
-        self.assertEqual(response.card.type, "raw")
+        assert response.toast.type == "info"
+        assert response.card.type == "raw"
         data_obj = response.card.data
         meal_buttons = [
             item for item in data_obj["body"]["elements"] if item.get("tag") == "button" and item["text"]["content"] in {"午餐", "晚餐"}
         ]
-        self.assertEqual(len(meal_buttons), 2)
-        self.assertTrue(all(button["type"] == "primary" for button in meal_buttons))
+        assert len(meal_buttons) == 2
+        assert all(button["type"] == "primary" for button in meal_buttons)
 
     def test_handle_card_frame_action_works_for_card_message_type(self) -> None:
         data = SimpleNamespace(
@@ -305,8 +304,8 @@ class BookingServiceMockTests(unittest.TestCase):
             record_id="rec_lunch",
             prefer_direct=True,
         )
-        self.assertEqual(response["toast"]["type"], "info")
-        self.assertEqual(response["card"]["type"], "raw")
+        assert response["toast"]["type"] == "info"
+        assert response["card"]["type"] == "raw"
 
     def test_handle_card_action_refresh_state_only_reads_records(self) -> None:
         self.repo.list_user_meal_rows.return_value = [
@@ -337,15 +336,15 @@ class BookingServiceMockTests(unittest.TestCase):
             target_date=date(2099, 1, 1),
             open_id="ou_sender",
         )
-        self.assertEqual(response.toast.type, "info")
-        self.assertEqual(response.toast.content, "已刷新最新预约状态")
+        assert response.toast.type == "info"
+        assert response.toast.content == "已刷新最新预约状态"
         payload = response.card.data
         meal_buttons = [
             item for item in payload["body"]["elements"] if item.get("tag") == "button" and item["text"]["content"] in {"午餐", "晚餐"}
         ]
         status_by_meal = {item["text"]["content"]: item["type"] for item in meal_buttons}
-        self.assertEqual(status_by_meal["午餐"], "default")
-        self.assertEqual(status_by_meal["晚餐"], "primary")
+        assert status_by_meal["午餐"] == "default"
+        assert status_by_meal["晚餐"] == "primary"
 
     def test_handle_card_action_rejects_operator_mismatch(self) -> None:
         data = SimpleNamespace(
@@ -366,8 +365,8 @@ class BookingServiceMockTests(unittest.TestCase):
 
         response = self.service.handle_card_action(data)
 
-        self.assertEqual(response.toast.type, "error")
-        self.assertEqual(response.toast.content, "仅允许本人提交预约")
+        assert response.toast.type == "error"
+        assert response.toast.content == "仅允许本人提交预约"
         self.repo.upsert_meal_record.assert_not_called()
         self.repo.cancel_meal_record.assert_not_called()
 
@@ -383,7 +382,7 @@ class BookingServiceMockTests(unittest.TestCase):
                 call("ou_2", "2026-02-12 午餐 预约人数: 3"),
             ]
         )
-        self.assertEqual(self.im.send_text.call_count, 2)
+        assert self.im.send_text.call_count == 2
 
     def test_send_card_to_user_today_when_user_missing(self) -> None:
         self.repo.list_user_profiles.return_value = []
@@ -419,8 +418,8 @@ class BookingServiceMockTests(unittest.TestCase):
 
         response = service.handle_card_action(data)
 
-        self.assertEqual(response.toast.type, "error")
-        self.assertIn("已过截止时间", response.toast.content)
+        assert response.toast.type == "error"
+        assert "已过截止时间" in response.toast.content
 
     def test_handle_card_action_accepts_when_before_cutoff_with_simulated_now(self) -> None:
         service = BookingService(
@@ -449,9 +448,5 @@ class BookingServiceMockTests(unittest.TestCase):
 
         response = service.handle_card_action(data)
 
-        self.assertEqual(response.toast.type, "info")
-        self.assertEqual(response.toast.content, "预约已更新")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert response.toast.type == "info"
+        assert response.toast.content == "预约已更新"

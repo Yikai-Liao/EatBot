@@ -3,19 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
-import logging
 import time as mono_time
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from loguru import logger
 from eatbot.adapters.feishu_clients import BitableAdapter, FeishuApiError, TableFieldMapping
 from eatbot.config import RuntimeConfig
 from eatbot.domain.decision import parse_meals
 from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
-
-
-logger = logging.getLogger(__name__)
-
 
 @dataclass(slots=True)
 class MealRecordRow:
@@ -141,8 +137,8 @@ class BitableRepository:
                 update_started = mono_time.monotonic()
                 try:
                     self._bitable.update_record(table_id=table_id, record_id=record_id, fields=update_payload)
-                    logger.info(
-                        "meal_record.upsert: mode=direct_update date=%s meal=%s cost=%dms",
+                    logger.debug(
+                        "meal_record.upsert: mode=direct_update date={} meal={} cost={}ms",
                         target_date.isoformat(),
                         meal.value,
                         int((mono_time.monotonic() - update_started) * 1000),
@@ -150,14 +146,14 @@ class BitableRepository:
                     return record_id
                 except FeishuApiError:
                     logger.warning(
-                        "meal_record.upsert: direct_update 失败, fallback=create date=%s meal=%s",
+                        "meal_record.upsert: direct_update 失败, fallback=create date={} meal={}",
                         target_date.isoformat(),
                         meal.value,
                     )
             create_started = mono_time.monotonic()
             created = self._bitable.create_record(table_id=table_id, fields=payload)
-            logger.info(
-                "meal_record.upsert: mode=direct_create date=%s meal=%s write=%dms total=%dms",
+            logger.debug(
+                "meal_record.upsert: mode=direct_create date={} meal={} write={}ms total={}ms",
                 target_date.isoformat(),
                 meal.value,
                 int((mono_time.monotonic() - create_started) * 1000),
@@ -169,8 +165,8 @@ class BitableRepository:
             update_started = mono_time.monotonic()
             try:
                 self._bitable.update_record(table_id=table_id, record_id=record_id, fields=payload)
-                logger.info(
-                    "meal_record.upsert: mode=update_by_hint date=%s meal=%s write=%dms total=%dms",
+                logger.debug(
+                    "meal_record.upsert: mode=update_by_hint date={} meal={} write={}ms total={}ms",
                     target_date.isoformat(),
                     meal.value,
                     int((mono_time.monotonic() - update_started) * 1000),
@@ -179,7 +175,7 @@ class BitableRepository:
                 return record_id
             except FeishuApiError:
                 logger.warning(
-                    "meal_record.upsert: update_by_hint 失败, fallback=scan date=%s meal=%s",
+                    "meal_record.upsert: update_by_hint 失败, fallback=scan date={} meal={}",
                     target_date.isoformat(),
                     meal.value,
                 )
@@ -191,8 +187,8 @@ class BitableRepository:
         if match:
             write_started = mono_time.monotonic()
             self._bitable.update_record(table_id=table_id, record_id=match.record_id, fields=payload)
-            logger.info(
-                "meal_record.upsert: mode=scan_update date=%s meal=%s scan=%dms write=%dms total=%dms",
+            logger.debug(
+                "meal_record.upsert: mode=scan_update date={} meal={} scan={}ms write={}ms total={}ms",
                 target_date.isoformat(),
                 meal.value,
                 scan_cost,
@@ -203,8 +199,8 @@ class BitableRepository:
 
         write_started = mono_time.monotonic()
         created = self._bitable.create_record(table_id=table_id, fields=payload)
-        logger.info(
-            "meal_record.upsert: mode=scan_create date=%s meal=%s scan=%dms write=%dms total=%dms",
+        logger.debug(
+            "meal_record.upsert: mode=scan_create date={} meal={} scan={}ms write={}ms total={}ms",
             target_date.isoformat(),
             meal.value,
             scan_cost,
@@ -225,8 +221,8 @@ class BitableRepository:
         started_at = mono_time.monotonic()
         if prefer_direct:
             if not record_id:
-                logger.info(
-                    "meal_record.cancel: mode=direct_skip date=%s meal=%s total=%dms",
+                logger.debug(
+                    "meal_record.cancel: mode=direct_skip date={} meal={} total={}ms",
                     target_date.isoformat(),
                     meal.value,
                     int((mono_time.monotonic() - started_at) * 1000),
@@ -242,14 +238,14 @@ class BitableRepository:
                 )
             except FeishuApiError:
                 logger.warning(
-                    "meal_record.cancel: direct_update 失败, record_id=%s date=%s meal=%s",
+                    "meal_record.cancel: direct_update 失败, record_id={} date={} meal={}",
                     record_id,
                     target_date.isoformat(),
                     meal.value,
                 )
                 return None
-            logger.info(
-                "meal_record.cancel: mode=direct_update date=%s meal=%s write=%dms total=%dms",
+            logger.debug(
+                "meal_record.cancel: mode=direct_update date={} meal={} write={}ms total={}ms",
                 target_date.isoformat(),
                 meal.value,
                 int((mono_time.monotonic() - write_started) * 1000),
@@ -273,8 +269,8 @@ class BitableRepository:
         )
         if match is None:
             if not record_id:
-                logger.info(
-                    "meal_record.cancel: mode=scan_skip date=%s meal=%s scan=%dms total=%dms",
+                logger.debug(
+                    "meal_record.cancel: mode=scan_skip date={} meal={} scan={}ms total={}ms",
                     target_date.isoformat(),
                     meal.value,
                     scan_cost,
@@ -290,14 +286,14 @@ class BitableRepository:
                 )
             except FeishuApiError:
                 logger.warning(
-                    "meal_record.cancel: scan_fallback_update 失败, record_id=%s date=%s meal=%s",
+                    "meal_record.cancel: scan_fallback_update 失败, record_id={} date={} meal={}",
                     record_id,
                     target_date.isoformat(),
                     meal.value,
                 )
                 return None
-            logger.info(
-                "meal_record.cancel: mode=scan_fallback_update date=%s meal=%s scan=%dms write=%dms total=%dms",
+            logger.debug(
+                "meal_record.cancel: mode=scan_fallback_update date={} meal={} scan={}ms write={}ms total={}ms",
                 target_date.isoformat(),
                 meal.value,
                 scan_cost,
@@ -313,8 +309,8 @@ class BitableRepository:
             record_id=target_record_id,
             fields=payload,
         )
-        logger.info(
-            "meal_record.cancel: mode=scan_update date=%s meal=%s scan=%dms write=%dms total=%dms",
+        logger.debug(
+            "meal_record.cancel: mode=scan_update date={} meal={} scan={}ms write={}ms total={}ms",
             target_date.isoformat(),
             meal.value,
             scan_cost,

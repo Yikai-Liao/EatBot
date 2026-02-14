@@ -75,9 +75,15 @@
 
 ## 5. 配置文件说明
 - `config.shared.toml`：可提交，保存 app_token、table_id、字段名映射。
-- `config.local.toml`：本地私密，保存 app_id、app_secret。
+- `config.local.toml`：本地私密，保存 app_id、app_secret、日志本地落盘配置。
 - `config.shared.toml` 中 `schedule` 段用于配置发卡时间和午/晚餐截止时间。
 - 加载建议：先加载 `config.shared.toml`，再用 `config.local.toml` 覆盖。
+- `config.local.toml` 日志配置示例：
+```toml
+[logging]
+file_path = "logs/eatbot.log"
+max_size_mb = 20
+```
 
 ## 6. 飞书事件与回调配置（必配）
 ### 6.1 回调订阅方式
@@ -97,13 +103,14 @@
 - 每次修改“事件与回调”配置后，都要创建并发布新版本，否则配置不会生效。
 - 若点击卡片报 `200340`，优先检查：回调订阅方式、`card.action.trigger` 是否已添加、应用版本是否已发布。
 
-## 7. 当前实现进度（第一版）
-- 已完成阶段 1~4：工程骨架、配置合并校验、飞书客户端封装、字段名动态解析、业务读模型。
-- 已完成阶段 5~7 的首版：预约卡片发送、回调更新、午晚餐统计定时发送。
-- 已接入飞书长连接事件：`im.message.receive_v1` 和 `card.action.trigger`（新卡片回调）。
-- 当前保留项：联调验证、复杂异常场景回归、上线运维细化。
+## 7. 当前实现状态（2026-02-14）
+- 已实现完整主流程：工作日发卡、卡片交互回写、截止控制、午晚餐统计发送。
+- 已接入飞书长连接事件：`im.message.receive_v1`、`card.action.trigger`。
+- CLI 已统一为 Typer 命令树：`run`、`check`、`send cards`、`send stats`、`dev listen`、`dev cron`。
+- 日志体系已统一为 Loguru：命令行输出与文件持久化同时启用，支持文件大小轮转。
+- 测试框架已统一为 Pytest，覆盖配置加载、CLI 参数、核心业务规则与卡片处理。
 
-## 8. 技术方案
+## 8. 技术实现
 - 事件接收：飞书长连接（WebSocket）模式。
 - `im.message.receive_v1`：使用 `asyncio` 协程调度异步处理，避免阻塞长连接主处理线程。
 - `card.action.trigger`：同步处理并在 3 秒内返回 `toast` / 更新后的卡片。
@@ -111,69 +118,77 @@
 - 数据访问：Bitable OpenAPI（records / fields）。
 - 调度策略：进程内定时任务 + 截止时间判定。
 - 数据一致性：写入前按“日期+人员+餐食类型”幂等检查。
+- CLI/参数管理：Typer。
+- 日志：Loguru（stdout + file sink）。
+- 测试：Pytest。
 
-## 9. 运行方式
-- 配置校验：`uv run python main.py --check`
-- 单次发送今日卡片：`uv run python main.py --send-today`
-- 单次发送指定日期卡片：`uv run python main.py --send-date 2026-02-14`
-- 常驻运行（长连接 + 定时任务）：`uv run python main.py`
-- 测试模式（启用虚拟时间）：`uv run python main.py --test-mode --test-now 2026-02-13T09:00`
-- 测试模式说明：
-- `--test-mode` 会禁用进程内定时任务，仅保留长连接回调联调，避免误触发正式定时发送。
-- `--test-now` 用于模拟“当前时间”，可反复调整以验证截止前/截止后逻辑。
-- 不传 `--test-now` 时，截止判断仍使用真实系统时间。
+## 9. CLI 运行方式
+### 9.1 命令树
+```text
+eatbot
+├─ check
+├─ run
+├─ send
+│  ├─ cards
+│  └─ stats
+└─ dev
+   ├─ listen
+   └─ cron
+```
+
+### 9.2 命令定义
+- 仓库内推荐入口：`uv run eatbot <command>`。
+
+- `eatbot check`
+- 仅做配置和字段映射校验后退出。
+
+- `eatbot run [--log-level debug|info|warning|error]`
+- 生产常驻模式：启动长连接与定时任务。
+- `--log-level` 默认 `info`。
+- 启动后日志会同时输出到命令行与 `config.local.toml` 中配置的日志文件。
+
+- `eatbot send cards [--date YYYY-MM-DD]`
+- 一次性发送预约卡片，`--date` 不传默认当天。
+
+- `eatbot send stats --meal lunch|dinner|all [--date YYYY-MM-DD]`
+- 一次性发送统计消息，`--date` 不传默认当天。
+
+- `eatbot dev listen [--at YYYY-MM-DDTHH:MM]`
+- 开发联调模式：仅启动长连接，不启动定时任务。
+- `--at` 用于注入虚拟当前时间（截止逻辑联调）。
+
+- `eatbot dev cron --from YYYY-MM-DDTHH:MM --to YYYY-MM-DDTHH:MM [--execute]`
+- 定时器窗口验证命令。
+- 默认 dry-run：仅输出窗口内应触发的任务。
+- 加 `--execute`：按时间顺序执行窗口内应触发任务。
+
+### 9.3 参数语义
+- `--date`：业务日期（发卡/发统计对应哪一天）。
+- `--at`：虚拟当前时间（仅 `dev listen`）。
+- `--from`/`--to`：定时器验证窗口（仅 `dev cron`）。
+
+### 9.4 调用示例
+- `uv run eatbot check`
+- `uv run eatbot run`
+- `uv run eatbot run --log-level debug`
+- `uv run eatbot send cards --date 2026-02-14`
+- `uv run eatbot send stats --meal lunch --date 2026-02-14`
+- `uv run eatbot dev listen --at 2026-02-14T10:31`
+- `uv run eatbot dev cron --from 2026-02-14T09:00 --to 2026-02-14T11:00`
+- `uv run eatbot dev cron --from 2026-02-14T09:00 --to 2026-02-14T11:00 --execute`
+
+### 9.5 旧参数迁移
+- `--check` -> `check`
+- `--send-today` -> `send cards`
+- `--send-date YYYY-MM-DD` -> `send cards --date YYYY-MM-DD`
+- 无参数启动 -> `run`
+- `--test-mode --test-now ...` -> `dev listen --at ...`
+
+### 9.6 补充说明
 - 用户给机器人发 `订餐` 可触发给本人发今日预约卡片。
 - 真实环境联调手册：`docs/飞书真实环境联调手册.md`
 
-## 10. 验收标准
-- 每日按规则发卡，无重复、无漏发。
-- 截止时间前可改、截止后不可改。
-- 卡片按钮提交可正确反映到“用餐记录”表。
-- 每餐截止后统计人数正确，并可发送到接收人。
-- 表字段改名后，仅修改 `config.shared.toml` 可恢复运行。
-
-## 11. 详细开发计划
-### 阶段 1：工程骨架与配置加载
-- 建立项目目录：`src/`、`services/`、`domain/`、`adapters/`。
-- 实现配置加载器：合并 `config.shared.toml` + `config.local.toml`。
-- 启动时做配置校验（必填项、重复项、字段名空值）。
-
-### 阶段 2：飞书客户端与鉴权
-- 封装 token 管理：自动获取和刷新 tenant_access_token。
-- 封装 Bitable API 客户端（fields/list、records/list、create、update）。
-- 封装 IM 客户端（发送卡片、发送文本统计）。
-
-### 阶段 3：字段名动态解析
-- 启动时拉取四张表 fields。
-- 按 `config.shared.toml` 的字段名映射生成 runtime field_id 映射。
-- 校验字段唯一性与类型，不通过则启动失败并输出明确错误。
-
-### 阶段 4：业务读模型
-- 读取并构建：人员配置模型、定时配置模型、统计接收人模型。
-- 实现日期决策器：默认规则 + 覆盖规则优先级。
-- 产出当天发送计划（不发/发午餐/发晚餐/发两餐）。
-
-### 阶段 5：预约卡片发送与落库
-- 按计划给启用用户发卡。
-- 依据默认偏好初始化记录。
-- 同步创建用餐记录（幂等）。
-
-### 阶段 6：卡片回调处理
-- 处理卡片按钮回调事件。
-- 在截止时间内执行更新；超过截止时间拒绝修改并返回提示。
-- 更新策略：通过“预约状态”字段切换勾选状态，勾选则创建或修正记录。
-
-### 阶段 7：餐次统计任务
-- 为午餐/晚餐分别建立截止后统计任务。
-- 聚合可用记录并计算人数。
-- 向统计接收人发送消息。
-
-### 阶段 8：测试与回归
-- 单元测试：日期决策、字段映射、幂等写入、截止判断。
-- 集成测试：对接飞书沙箱/测试表进行全流程验证。
-- 回归清单：改字段名、改表 ID、跨天任务、重复事件。
-
-### 阶段 9：上线与运维
-- 增加结构化日志与错误告警。
-- 输出运维手册：常见错误码、配置变更流程、排障步骤。
-- 设定发布流程：灰度验证 -> 全量启用。
+## 10. 当前验证状态（2026-02-14）
+- 核心命令可用：`uv run eatbot --help`、`uv run eatbot run --help`。
+- 自动化测试通过：`uv run pytest -q`，当前为 `33 passed`。
+- 已知 warning 主要来自 `lark_oapi` 上游依赖内部弃用项，不影响当前功能运行。

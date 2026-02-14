@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import logging
 import time as mono_time
 from typing import Any
 
 import lark_oapi as lark
+from loguru import logger
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
     CreateAppTableRecordRequest,
@@ -17,10 +17,6 @@ from lark_oapi.api.bitable.v1 import (
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
 from eatbot.config import RuntimeConfig
-
-
-logger = logging.getLogger(__name__)
-
 
 class FeishuApiError(Exception):
     pass
@@ -80,8 +76,8 @@ class BitableAdapter:
             body = response.data
             page_items = len(body.items) if body and body.items else 0
             page_count += 1
-            logger.info(
-                "Feishu API耗时: api=bitable.v1.app_table_field.list table=%s page=%d items=%d cost=%dms",
+            logger.debug(
+                "Feishu API耗时: api=bitable.v1.app_table_field.list table={} page={} items={} cost={}ms",
                 table_id,
                 page_count,
                 page_items,
@@ -93,8 +89,8 @@ class BitableAdapter:
                 break
             page_token = body.page_token
 
-        logger.info(
-            "Feishu API汇总: api=bitable.v1.app_table_field.list table=%s pages=%d items=%d total=%dms",
+        logger.debug(
+            "Feishu API汇总: api=bitable.v1.app_table_field.list table={} pages={} items={} total={}ms",
             table_id,
             page_count,
             len(items),
@@ -127,8 +123,8 @@ class BitableAdapter:
             body = response.data
             page_items = len(body.items) if body and body.items else 0
             page_count += 1
-            logger.info(
-                "Feishu API耗时: api=bitable.v1.app_table_record.list table=%s page=%d items=%d cost=%dms",
+            logger.debug(
+                "Feishu API耗时: api=bitable.v1.app_table_record.list table={} page={} items={} cost={}ms",
                 table_id,
                 page_count,
                 page_items,
@@ -140,8 +136,8 @@ class BitableAdapter:
                 break
             page_token = body.page_token
 
-        logger.info(
-            "Feishu API汇总: api=bitable.v1.app_table_record.list table=%s pages=%d items=%d total=%dms",
+        logger.debug(
+            "Feishu API汇总: api=bitable.v1.app_table_record.list table={} pages={} items={} total={}ms",
             table_id,
             page_count,
             len(items),
@@ -164,8 +160,8 @@ class BitableAdapter:
         self._ensure_success("bitable.v1.app_table_record.create", response)
         if response.data is None or response.data.record is None:
             raise FeishuApiError("创建记录失败: response.data.record 为空")
-        logger.info(
-            "Feishu API耗时: api=bitable.v1.app_table_record.create table=%s cost=%dms",
+        logger.debug(
+            "Feishu API耗时: api=bitable.v1.app_table_record.create table={} cost={}ms",
             table_id,
             request_cost,
         )
@@ -187,8 +183,8 @@ class BitableAdapter:
         self._ensure_success("bitable.v1.app_table_record.update", response)
         if response.data is None or response.data.record is None:
             raise FeishuApiError("更新记录失败: response.data.record 为空")
-        logger.info(
-            "Feishu API耗时: api=bitable.v1.app_table_record.update table=%s record_id=%s cost=%dms",
+        logger.debug(
+            "Feishu API耗时: api=bitable.v1.app_table_record.update table={} record_id={} cost={}ms",
             table_id,
             record_id,
             request_cost,

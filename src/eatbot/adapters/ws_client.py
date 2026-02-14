@@ -5,10 +5,10 @@ import http
 import time
 from typing import Any, Callable
 
+from loguru import logger
 from lark_oapi.card.model import Card
 from lark_oapi.core.const import UTF_8
 from lark_oapi.core.json import JSON
-from lark_oapi.core.log import logger
 from lark_oapi.ws.client import Client as BaseWsClient
 from lark_oapi.ws.client import _get_by_key
 from lark_oapi.ws.const import (

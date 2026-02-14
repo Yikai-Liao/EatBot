@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 import json
-import logging
 import time as mono_time
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from loguru import logger
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 from lark_oapi.card.model import Card
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -21,10 +21,6 @@ from eatbot.domain.decision import MealPlanDecider, parse_meals
 from eatbot.domain.models import Meal, UserProfile
 from eatbot.services.repositories import BitableRepository
 from eatbot.adapters.feishu_clients import IMAdapter
-
-
-logger = logging.getLogger(__name__)
-
 
 class BookingService:
     def __init__(
@@ -48,15 +44,15 @@ class BookingService:
         rules = self._repository.list_schedule_rules()
         plan = self._decider.decide(target, rules)
         if not plan.meals:
-            logger.info("今天不发送订餐卡片: date=%s", target.isoformat())
+            logger.info("今天不发送订餐卡片: date={}", target.isoformat())
             return
 
         users = [user for user in self._repository.list_user_profiles() if user.enabled]
         for user in users:
             try:
                 self._send_card_to_user(user=user, target_date=target, allowed_meals=plan.meals)
-            except Exception as exc:
-                logger.exception("给用户发卡失败, user=%s, open_id=%s, err=%s", user.display_name, user.open_id, exc)
+            except Exception:
+                logger.exception("给用户发卡失败, user={}, open_id={}", user.display_name, user.open_id)
 
     def send_card_to_user_today(self, open_id: str) -> None:
         today = self._now().date()
@@ -115,11 +111,11 @@ class BookingService:
             return self._toast(level, content, card_payload)
         except ValueError as exc:
             return self._toast("error", str(exc))
-        except Exception as exc:
-            logger.exception("处理卡片回调失败: %s", exc)
+        except Exception:
+            logger.exception("处理卡片回调失败")
             return self._toast("error", "预约更新失败")
         finally:
-            logger.info("卡片回调处理耗时: %dms source=event", int((mono_time.monotonic() - started_at) * 1000))
+            logger.debug("卡片回调处理耗时: {}ms source=event", int((mono_time.monotonic() - started_at) * 1000))
 
     def handle_card_frame_action(self, data: Card) -> dict[str, Any]:
         started_at = mono_time.monotonic()
@@ -137,11 +133,11 @@ class BookingService:
             return self._toast_dict(level, content, card_payload)
         except ValueError as exc:
             return self._toast_dict("error", str(exc))
-        except Exception as exc:
-            logger.exception("处理卡片回调失败: %s", exc)
+        except Exception:
+            logger.exception("处理卡片回调失败")
             return self._toast_dict("error", "预约更新失败")
         finally:
-            logger.info("卡片回调处理耗时: %dms source=card", int((mono_time.monotonic() - started_at) * 1000))
+            logger.debug("卡片回调处理耗时: {}ms source=card", int((mono_time.monotonic() - started_at) * 1000))
 
     def _send_card_to_user(self, *, user: UserProfile, target_date: date, allowed_meals: set[Meal]) -> None:
         defaults = user.meal_preferences & allowed_meals
@@ -205,7 +201,7 @@ class BookingService:
 
         try:
             logger.info(
-                "收到卡片回调: source=%s operator=%s action=%s",
+                "收到卡片回调: source={} operator={} action={}",
                 source,
                 operator_open_id or "",
                 action_name,
@@ -298,8 +294,8 @@ class BookingService:
             return ("info", "预约已更新", card_payload)
         finally:
             total_cost = int((mono_time.monotonic() - perf_total_started) * 1000)
-            logger.info(
-                "卡片回调分段耗时: source=%s action=%s parse=%dms apply=%dms build=%dms total=%dms",
+            logger.debug(
+                "卡片回调分段耗时: source={} action={} parse={}ms apply={}ms build={}ms total={}ms",
                 source,
                 action_name,
                 phase_cost.get("parse_and_validate", 0),
@@ -347,8 +343,8 @@ class BookingService:
                 )
                 upsert_count += 1
                 updated_record_ids[meal] = record_id
-                logger.info(
-                    "预约写入耗时: op=upsert meal=%s date=%s direct=%s cost=%dms",
+                logger.debug(
+                    "预约写入耗时: op=upsert meal={} date={} direct={} cost={}ms",
                     meal.value,
                     target_date.isoformat(),
                     has_record_id,
@@ -366,8 +362,8 @@ class BookingService:
                 cancel_count += 1
                 if kept_id is not None:
                     updated_record_ids[meal] = kept_id
-                logger.info(
-                    "预约写入耗时: op=cancel meal=%s date=%s has_record=%s cost=%dms",
+                logger.debug(
+                    "预约写入耗时: op=cancel meal={} date={} has_record={} cost={}ms",
                     meal.value,
                     target_date.isoformat(),
                     bool(record_id),
@@ -376,8 +372,8 @@ class BookingService:
 
         write_cost = int((mono_time.monotonic() - write_started) * 1000)
         total_cost = int((mono_time.monotonic() - started_at) * 1000)
-        logger.info(
-            "预约写入分段耗时: date=%s open_id=%s changed=%d cutoff=%dms write=%dms upsert=%d cancel=%d total=%dms",
+        logger.debug(
+            "预约写入分段耗时: date={} open_id={} changed={} cutoff={}ms write={}ms upsert={} cancel={} total={}ms",
             target_date.isoformat(),
             operator_open_id,
             len(changed_meals),

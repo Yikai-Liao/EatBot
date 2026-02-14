@@ -1,11 +1,24 @@
 [project]
 name = "eatbot"
 version = "0.1.0"
-description = "Add your description here"
+description = "A meal reservation bot for Feishu, built with Python and APScheduler."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "apscheduler>=3.11.2",
     "lark-oapi>=1.5.3",
+    "loguru>=0.7.3",
     "pydantic>=2.12.5",
+    "pytest>=8.4.2",
+    "typer>=0.16.1",
 ]
+
+[project.scripts]
+eatbot = "eatbot.app:main"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eatbot"]

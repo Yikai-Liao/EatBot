@@ -75,6 +75,29 @@ class ScheduleConfig(BaseModel):
         return _parse_hhmm(self.dinner_cutoff)
 
 
+class LoggingConfig(BaseModel):
+    file_path: str = "logs/eatbot.log"
+    max_size_mb: int = 20
+
+    @field_validator("file_path")
+    @classmethod
+    def validate_file_path(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("日志文件路径不能为空")
+        return value
+
+    @field_validator("max_size_mb")
+    @classmethod
+    def validate_max_size_mb(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("日志文件大小上限必须大于 0")
+        return value
+
+    @property
+    def max_size_bytes(self) -> int:
+        return self.max_size_mb * 1024 * 1024
+
+
 class RuntimeConfig(BaseModel):
     app_id: str
     app_secret: str
@@ -83,6 +106,7 @@ class RuntimeConfig(BaseModel):
     tables: TablesConfig
     field_names: FieldNamesConfig
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     @model_validator(mode="after")
     def validate_unique_field_names(self) -> "RuntimeConfig":
