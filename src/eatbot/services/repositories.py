@@ -40,7 +40,7 @@ class BitableRepository:
         records = self._bitable.list_records(table_id)
         fields = self._table_fields("user_config")
 
-        users: list[UserProfile] = []
+        users_by_open_id: dict[str, UserProfile] = {}
         for record in records:
             data = record.fields or {}
             person_value = data.get(fields["user"])
@@ -62,9 +62,11 @@ class BitableRepository:
                 dinner_price=_to_decimal(data.get(fields["dinner_price"])),
                 meal_preferences=parse_meals(data.get(fields["meal_preference"])),
             )
-            users.append(user)
+            if open_id in users_by_open_id:
+                users_by_open_id.pop(open_id)
+            users_by_open_id[open_id] = user
 
-        return users
+        return list(users_by_open_id.values())
 
     def list_schedule_rules(self) -> list[MealScheduleRule]:
         table_id = self._table_id("meal_schedule")
@@ -100,16 +102,16 @@ class BitableRepository:
         records = self._bitable.list_records(table_id)
         field_name = self._table_fields("stats_receivers")["user"]
 
-        open_ids: list[str] = []
-        seen: set[str] = set()
+        open_ids: dict[str, None] = {}
         for record in records:
             data = record.fields or {}
             open_id = _extract_open_id(data.get(field_name))
-            if not open_id or open_id in seen:
+            if not open_id:
                 continue
-            seen.add(open_id)
-            open_ids.append(open_id)
-        return open_ids
+            if open_id in open_ids:
+                open_ids.pop(open_id)
+            open_ids[open_id] = None
+        return list(open_ids.keys())
 
     def upsert_meal_record(
         self,
@@ -331,7 +333,7 @@ class BitableRepository:
         records = self._bitable.list_records(table_id)
         fields = self._table_fields("meal_record")
 
-        rows: list[MealRecordRow] = []
+        rows_by_key: dict[tuple[str | None, Meal | None], MealRecordRow] = {}
         for record in records:
             data = record.fields or {}
             record_date = _to_date(data.get(fields["date"]), self._timezone)
@@ -344,17 +346,19 @@ class BitableRepository:
 
             meal_type = _to_meal(data.get(fields["meal_type"]))
             reservation_status = _to_checkbox(data.get(fields["reservation_status"]), default=True)
-            rows.append(
-                MealRecordRow(
-                    record_id=record.record_id,
-                    target_date=record_date,
-                    open_id=record_open_id,
-                    meal_type=meal_type,
-                    reservation_status=reservation_status,
-                )
+            row = MealRecordRow(
+                record_id=record.record_id,
+                target_date=record_date,
+                open_id=record_open_id,
+                meal_type=meal_type,
+                reservation_status=reservation_status,
             )
+            key = (record_open_id, meal_type)
+            if key in rows_by_key:
+                rows_by_key.pop(key)
+            rows_by_key[key] = row
 
-        return rows
+        return list(rows_by_key.values())
 
     def _meal_payload(
         self,

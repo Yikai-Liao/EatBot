@@ -37,3 +37,7 @@ send_time = "00:00"
 lunch_cutoff = "10:00"
 # 晚餐截止时间（HH:MM）
 dinner_cutoff = "16:00"
+# 统计发送偏移（HH:MM:SS），表示在截止时间后多久发送统计
+send_stat_offset = "00:01:00"
+# 用餐定时配置缓存 TTL（分钟）
+schedule_cache_ttl_minutes = 30

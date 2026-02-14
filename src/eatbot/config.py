@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import time
+from datetime import time, timedelta
 from pathlib import Path
 import tomllib
 from typing import Any
@@ -55,11 +55,26 @@ class ScheduleConfig(BaseModel):
     send_time: str = "09:00"
     lunch_cutoff: str = "10:30"
     dinner_cutoff: str = "16:30"
+    send_stat_offset: str = "00:00:00"
+    schedule_cache_ttl_minutes: int = 30
 
     @field_validator("send_time", "lunch_cutoff", "dinner_cutoff")
     @classmethod
     def validate_hhmm(cls, value: str) -> str:
         _parse_hhmm(value)
+        return value
+
+    @field_validator("send_stat_offset")
+    @classmethod
+    def validate_send_stat_offset(cls, value: str) -> str:
+        _parse_duration_hhmmss(value)
+        return value
+
+    @field_validator("schedule_cache_ttl_minutes")
+    @classmethod
+    def validate_schedule_cache_ttl_minutes(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("schedule_cache_ttl_minutes 必须大于 0")
         return value
 
     @property
@@ -73,6 +88,25 @@ class ScheduleConfig(BaseModel):
     @property
     def dinner_cutoff_obj(self) -> time:
         return _parse_hhmm(self.dinner_cutoff)
+
+    @property
+    def send_stat_offset_obj(self) -> timedelta:
+        return _parse_duration_hhmmss(self.send_stat_offset)
+
+    @property
+    def schedule_cache_ttl_obj(self) -> timedelta:
+        return timedelta(minutes=self.schedule_cache_ttl_minutes)
+
+    @model_validator(mode="after")
+    def validate_stat_schedule_range(self) -> "ScheduleConfig":
+        offset_seconds = int(self.send_stat_offset_obj.total_seconds())
+        lunch_seconds = self.lunch_cutoff_obj.hour * 3600 + self.lunch_cutoff_obj.minute * 60 + self.lunch_cutoff_obj.second
+        dinner_seconds = self.dinner_cutoff_obj.hour * 3600 + self.dinner_cutoff_obj.minute * 60 + self.dinner_cutoff_obj.second
+        if lunch_seconds + offset_seconds >= 24 * 3600:
+            raise ValueError("lunch_cutoff + send_stat_offset 超出当天范围")
+        if dinner_seconds + offset_seconds >= 24 * 3600:
+            raise ValueError("dinner_cutoff + send_stat_offset 超出当天范围")
+        return self
 
 
 class LoggingConfig(BaseModel):
@@ -195,6 +229,25 @@ def _parse_hhmm(value: str) -> time:
     if hour < 0 or hour > 23 or minute < 0 or minute > 59:
         raise ValueError(f"时间范围错误: {value}")
     return time(hour=hour, minute=minute)
+
+
+def _parse_duration_hhmmss(value: str) -> timedelta:
+    parts = value.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"时长格式错误: {value}")
+
+    hour = int(parts[0])
+    minute = int(parts[1])
+    second = int(parts[2])
+    if hour < 0 or minute < 0 or second < 0:
+        raise ValueError(f"时长范围错误: {value}")
+    if minute > 59 or second > 59:
+        raise ValueError(f"时长范围错误: {value}")
+
+    total_seconds = hour * 3600 + minute * 60 + second
+    if total_seconds >= 24 * 3600:
+        raise ValueError(f"时长超出当天范围: {value}")
+    return timedelta(seconds=total_seconds)
 
 
 def _validate_no_duplicate_fields(mapping: dict[str, str], name: str) -> None:

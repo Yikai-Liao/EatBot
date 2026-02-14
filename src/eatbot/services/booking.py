@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 import json
@@ -18,11 +19,23 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 from eatbot.config import RuntimeConfig
 from eatbot.domain.cards import ReservationCardBuilder
 from eatbot.domain.decision import MealPlanDecider, parse_meals
-from eatbot.domain.models import Meal, UserProfile
+from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
 from eatbot.services.repositories import BitableRepository
 from eatbot.adapters.feishu_clients import IMAdapter
 
+
+@dataclass(slots=True, frozen=True)
+class CronPreviewSnapshot:
+    schedule_rules_count: int
+    enabled_user_count: int
+    stats_receiver_count: int
+    rules_by_date: dict[date, set[Meal]]
+    matched_rule_count_by_date: dict[date, int]
+
+
 class BookingService:
+    _ALL_MEALS = {Meal.LUNCH, Meal.DINNER}
+
     def __init__(
         self,
         *,
@@ -38,10 +51,12 @@ class BookingService:
         self._decider = MealPlanDecider()
         self._timezone = ZoneInfo(config.timezone)
         self._now_provider = now_provider
+        self._schedule_rules_cache: list[MealScheduleRule] | None = None
+        self._schedule_rules_cache_expires_at: datetime | None = None
 
     def send_daily_cards(self, target_date: date | None = None) -> None:
         target = target_date or self._now().date()
-        rules = self._repository.list_schedule_rules()
+        rules = self._list_schedule_rules(force_refresh=True)
         plan = self._decider.decide(target, rules)
         if not plan.meals:
             logger.info("今天不发送订餐卡片: date={}", target.isoformat())
@@ -61,7 +76,7 @@ class BookingService:
             self._im.send_text(open_id, "你不在用餐人员配置中，无法发起预约。")
             return
 
-        rules = self._repository.list_schedule_rules()
+        rules = self._list_schedule_rules()
         plan = self._decider.decide(today, rules)
         if not plan.meals:
             self._im.send_text(open_id, f"{today.isoformat()} 不在订餐发送范围。")
@@ -79,6 +94,69 @@ class BookingService:
         text = f"{target_date.isoformat()} {meal.value} 预约人数: {count}（{_weekday_text(target_date)}）"
         for open_id in receivers:
             self._im.send_text(open_id, text)
+
+    def build_cron_preview_snapshot(self, *, target_dates: set[date]) -> CronPreviewSnapshot:
+        rules = self._list_schedule_rules()
+        enabled_user_count = sum(1 for user in self._repository.list_user_profiles() if user.enabled)
+        stats_receiver_count = len(self._repository.list_stats_receiver_open_ids())
+
+        rules_by_date: dict[date, set[Meal]] = {}
+        matched_rule_count_by_date: dict[date, int] = {}
+        for target_date in target_dates:
+            matched_rule_count_by_date[target_date] = sum(
+                1 for rule in rules if rule.start_date <= target_date <= rule.end_date
+            )
+            plan = self._decider.decide(target_date, rules)
+            rules_by_date[target_date] = set(plan.meals)
+
+        return CronPreviewSnapshot(
+            schedule_rules_count=len(rules),
+            enabled_user_count=enabled_user_count,
+            stats_receiver_count=stats_receiver_count,
+            rules_by_date=rules_by_date,
+            matched_rule_count_by_date=matched_rule_count_by_date,
+        )
+
+    def preview_daily_cards(
+        self,
+        *,
+        target_date: date,
+        snapshot: CronPreviewSnapshot | None = None,
+    ) -> tuple[bool, str]:
+        if snapshot is None:
+            snapshot = self.build_cron_preview_snapshot(target_dates={target_date})
+        meals = snapshot.rules_by_date.get(target_date, set())
+        if not meals:
+            matched_rule_count = snapshot.matched_rule_count_by_date.get(target_date, 0)
+            if matched_rule_count > 0:
+                return False, "规则结果=不发送; 命中规则但餐次为空"
+            return (
+                False,
+                "规则结果=不发送; 周末默认不发送",
+            )
+
+        meals_text = _format_meals(meals)
+        if snapshot.enabled_user_count <= 0:
+            return (
+                False,
+                f"规则餐次={meals_text}; 启用用户=0",
+            )
+        return (
+            True,
+            f"规则餐次={meals_text}; 启用用户={snapshot.enabled_user_count}",
+        )
+
+    def preview_stats(
+        self,
+        *,
+        meal: Meal,
+        snapshot: CronPreviewSnapshot | None = None,
+    ) -> tuple[bool, str]:
+        if snapshot is None:
+            snapshot = self.build_cron_preview_snapshot(target_dates=set())
+        if snapshot.stats_receiver_count <= 0:
+            return False, f"餐次={meal.value}; 统计接收人=0"
+        return True, f"餐次={meal.value}; 统计接收人={snapshot.stats_receiver_count}"
 
     def handle_message_event(self, data: P2ImMessageReceiveV1) -> None:
         message = data.event.message if data and data.event else None
@@ -220,32 +298,53 @@ class BookingService:
             if target_date is None:
                 return ("error", "日期参数无效", None)
 
-            allowed = parse_meals(action_value.get("allowed_meals", []))
-            if not allowed:
-                return ("error", "无可预约餐次", None)
+            user = self._load_user(operator_open_id)
+            if user is None:
+                return ("error", "你不在用餐人员配置中，无法发起预约。", None)
 
-            defaults = parse_meals(action_value.get("default_meals", [])) & allowed
-            selected_before = parse_meals(action_value.get("selected_meals", [])) & allowed
+            allowed = self._allowed_meals_for_date(target_date)
+            defaults = user.meal_preferences & allowed
+            meal_prices = self._build_meal_prices(user=user, allowed_meals=allowed)
+
+            rows = self._repository.list_user_meal_rows(target_date=target_date, open_id=operator_open_id)
+            rows = self._sync_disallowed_meal_rows(
+                target_date=target_date,
+                open_id=operator_open_id,
+                allowed_meals=allowed,
+                rows=rows,
+            )
+            selected_before, meal_record_ids = self._resolve_selected_from_rows(rows=rows, allowed_meals=allowed)
             selected = set(selected_before)
-            meal_prices = _parse_meal_price_map(action_value.get("meal_prices"), allowed)
-            meal_record_ids = _parse_meal_record_id_map(action_value.get("meal_record_ids"), allowed)
+
             if action_name == "toggle_meal":
                 toggle = _parse_meal(action_value.get("toggle_meal"))
-                if toggle is None or toggle not in allowed:
+                if toggle is None:
                     return ("error", "不支持的餐次操作", None)
+                if toggle not in allowed:
+                    _mark("parse_and_validate")
+                    _mark("apply_selection")
+                    card_payload = self._card_builder.build_payload(
+                        target_date=target_date,
+                        lunch_cutoff=self._config.schedule.lunch_cutoff,
+                        dinner_cutoff=self._config.schedule.dinner_cutoff,
+                        user_open_id=operator_open_id,
+                        allowed_meals=allowed,
+                        default_meals=defaults,
+                        selected_meals=selected,
+                        meal_prices=meal_prices,
+                        meal_record_ids=meal_record_ids,
+                    )
+                    _mark("build_card")
+                    return ("info", f"{toggle.value} 当前不可预约，已同步最新状态", card_payload)
                 if toggle in selected:
                     selected.remove(toggle)
                 else:
                     selected.add(toggle)
             elif action_name == "submit_reservation":
-                if not selected:
-                    selected = parse_meals(form_value.get("meals"))
+                form_selected = parse_meals(form_value.get("meals"))
+                if form_selected:
+                    selected = form_selected & allowed
             elif action_name == "refresh_state":
-                selected, refreshed_record_ids = self._resolve_selected_from_records(
-                    target_date=target_date,
-                    open_id=operator_open_id,
-                    allowed_meals=allowed,
-                )
                 _mark("parse_and_validate")
                 _mark("apply_selection")
 
@@ -258,7 +357,7 @@ class BookingService:
                     default_meals=defaults,
                     selected_meals=selected,
                     meal_prices=meal_prices,
-                    meal_record_ids=refreshed_record_ids,
+                    meal_record_ids=meal_record_ids,
                 )
                 _mark("build_card")
                 return ("info", "已刷新最新预约状态", card_payload)
@@ -267,12 +366,6 @@ class BookingService:
 
             selected &= allowed
             changed_meals = {meal for meal in allowed if (meal in selected_before) != (meal in selected)}
-            meal_record_ids = self._fill_missing_record_ids(
-                target_date=target_date,
-                open_id=operator_open_id,
-                meals=changed_meals,
-                meal_record_ids=meal_record_ids,
-            )
             _mark("parse_and_validate")
 
             updated_record_ids = self._apply_selection(
@@ -325,7 +418,7 @@ class BookingService:
         cutoff_started = mono_time.monotonic()
         for meal in changed_meals:
             if not self._is_editable(target_date=target_date, meal=meal):
-                raise ValueError(f"{meal.value} 已过截止时间")
+                raise ValueError(f"{meal.value} 已过截止时间，如有特殊情况请联系管理员人工处理")
         cutoff_cost = int((mono_time.monotonic() - cutoff_started) * 1000)
 
         write_started = mono_time.monotonic()
@@ -391,28 +484,6 @@ class BookingService:
         )
         return updated_record_ids
 
-    def _fill_missing_record_ids(
-        self,
-        *,
-        target_date: date,
-        open_id: str,
-        meals: set[Meal],
-        meal_record_ids: dict[Meal, str | None],
-    ) -> dict[Meal, str | None]:
-        missing_meals = {meal for meal in meals if meal_record_ids.get(meal) is None}
-        if not missing_meals:
-            return meal_record_ids
-
-        rows = self._repository.list_user_meal_rows(target_date=target_date, open_id=open_id)
-        row_by_meal = _pick_rows_by_meal(rows=rows, allowed_meals=missing_meals)
-        updated = dict(meal_record_ids)
-        for meal in missing_meals:
-            row = row_by_meal.get(meal)
-            if row is None:
-                continue
-            updated[meal] = row.record_id
-        return updated
-
     def _resolve_selected_from_records(
         self,
         *,
@@ -421,6 +492,14 @@ class BookingService:
         allowed_meals: set[Meal],
     ) -> tuple[set[Meal], dict[Meal, str | None]]:
         rows = self._repository.list_user_meal_rows(target_date=target_date, open_id=open_id)
+        return self._resolve_selected_from_rows(rows=rows, allowed_meals=allowed_meals)
+
+    @staticmethod
+    def _resolve_selected_from_rows(
+        *,
+        rows: list[Any],
+        allowed_meals: set[Meal],
+    ) -> tuple[set[Meal], dict[Meal, str | None]]:
         row_by_meal = _pick_rows_by_meal(rows=rows, allowed_meals=allowed_meals)
         selected: set[Meal] = set()
         meal_record_ids: dict[Meal, str | None] = {meal: None for meal in allowed_meals}
@@ -432,6 +511,78 @@ class BookingService:
             if row.reservation_status:
                 selected.add(meal)
         return selected, meal_record_ids
+
+    def _list_schedule_rules(self, *, force_refresh: bool = False) -> list[MealScheduleRule]:
+        now = self._now()
+        cache_available = (
+            self._schedule_rules_cache is not None
+            and self._schedule_rules_cache_expires_at is not None
+            and now < self._schedule_rules_cache_expires_at
+        )
+        if force_refresh or not cache_available:
+            rules = self._repository.list_schedule_rules()
+            self._schedule_rules_cache = rules
+            self._schedule_rules_cache_expires_at = now + self._config.schedule.schedule_cache_ttl_obj
+            logger.debug(
+                "用餐定时配置缓存已刷新: force={} rules={} ttl_minutes={} expires_at={}",
+                force_refresh,
+                len(rules),
+                self._config.schedule.schedule_cache_ttl_minutes,
+                self._schedule_rules_cache_expires_at.isoformat(),
+            )
+        return list(self._schedule_rules_cache or [])
+
+    def _allowed_meals_for_date(self, target_date: date) -> set[Meal]:
+        rules = self._list_schedule_rules()
+        plan = self._decider.decide(target_date, rules)
+        return set(plan.meals)
+
+    @staticmethod
+    def _build_meal_prices(*, user: UserProfile, allowed_meals: set[Meal]) -> dict[Meal, Decimal]:
+        prices: dict[Meal, Decimal] = {}
+        if Meal.LUNCH in allowed_meals:
+            prices[Meal.LUNCH] = user.lunch_price
+        if Meal.DINNER in allowed_meals:
+            prices[Meal.DINNER] = user.dinner_price
+        return prices
+
+    def _sync_disallowed_meal_rows(
+        self,
+        *,
+        target_date: date,
+        open_id: str,
+        allowed_meals: set[Meal],
+        rows: list[Any],
+    ) -> list[Any]:
+        disallowed_meals = self._ALL_MEALS - allowed_meals
+        if not disallowed_meals:
+            return rows
+
+        disallowed_rows = _pick_rows_by_meal(rows=rows, allowed_meals=disallowed_meals)
+        changed_meals: set[Meal] = set()
+        for meal in disallowed_meals:
+            row = disallowed_rows.get(meal)
+            if row is None or not bool(getattr(row, "reservation_status", False)):
+                continue
+            self._repository.cancel_meal_record(
+                target_date=target_date,
+                open_id=open_id,
+                meal=meal,
+                record_id=row.record_id,
+                prefer_direct=True,
+            )
+            changed_meals.add(meal)
+
+        if not changed_meals:
+            return rows
+
+        logger.info(
+            "根据用餐定时配置自动取消不可预约餐次: date={} open_id={} meals={}",
+            target_date.isoformat(),
+            open_id,
+            _format_meals(changed_meals),
+        )
+        return self._repository.list_user_meal_rows(target_date=target_date, open_id=open_id)
 
     def _load_user(self, open_id: str) -> UserProfile | None:
         users = self._repository.list_user_profiles()
@@ -514,50 +665,27 @@ def _parse_meal(value: object) -> Meal | None:
     return None
 
 
-def _parse_meal_price_map(value: object, allowed: set[Meal]) -> dict[Meal, Decimal]:
-    result: dict[Meal, Decimal] = {}
-    if not isinstance(value, dict):
-        return result
-    for meal in allowed:
-        raw = value.get(meal.value)
-        if raw is None or str(raw).strip() == "":
-            continue
-        try:
-            result[meal] = Decimal(str(raw))
-        except Exception:
-            continue
-    return result
-
-
-def _parse_meal_record_id_map(value: object, allowed: set[Meal]) -> dict[Meal, str | None]:
-    result: dict[Meal, str | None] = {}
-    if not isinstance(value, dict):
-        return result
-    for meal in allowed:
-        raw = value.get(meal.value)
-        if raw is None:
-            result[meal] = None
-            continue
-        text = str(raw).strip()
-        result[meal] = text or None
-    return result
-
-
 def _pick_rows_by_meal(rows: list[Any], allowed_meals: set[Meal]) -> dict[Meal, Any]:
     selected: dict[Meal, Any] = {}
     for row in rows:
         meal = getattr(row, "meal_type", None)
         if meal not in allowed_meals:
             continue
-        existing = selected.get(meal)
-        if existing is None:
-            selected[meal] = row
-            continue
-        if not bool(getattr(existing, "reservation_status", False)) and bool(getattr(row, "reservation_status", False)):
-            selected[meal] = row
+        selected[meal] = row
     return selected
 
 
 def _weekday_text(target_date: date) -> str:
     weekdays = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
     return weekdays[target_date.weekday()]
+
+
+def _format_meals(meals: set[Meal]) -> str:
+    ordered: list[Meal] = []
+    if Meal.LUNCH in meals:
+        ordered.append(Meal.LUNCH)
+    if Meal.DINNER in meals:
+        ordered.append(Meal.DINNER)
+    if not ordered:
+        return "-"
+    return "、".join(meal.value for meal in ordered)

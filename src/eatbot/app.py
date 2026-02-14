@@ -23,7 +23,7 @@ from eatbot.adapters.feishu_clients import BitableAdapter, FeishuFactory, FieldM
 from eatbot.adapters.ws_client import WsClientPatched
 from eatbot.config import ConfigError, RuntimeConfig, ScheduleConfig, load_runtime_config
 from eatbot.domain.models import Meal
-from eatbot.services.booking import BookingService
+from eatbot.services.booking import BookingService, CronPreviewSnapshot
 from eatbot.services.repositories import BitableRepository
 
 
@@ -52,6 +52,7 @@ class CronJobSpec:
     action: CronAction
     hour: int
     minute: int
+    second: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -60,10 +61,17 @@ class CronTriggerEvent:
     spec: CronJobSpec
 
 
+@dataclass(slots=True, frozen=True)
+class CronActionPreview:
+    will_execute: bool
+    detail: str
+
+
 def build_cron_job_specs(schedule: ScheduleConfig) -> list[CronJobSpec]:
     send_time = schedule.send_time_obj
-    lunch_time = schedule.lunch_cutoff_obj
-    dinner_time = schedule.dinner_cutoff_obj
+    stat_offset = schedule.send_stat_offset_obj
+    lunch_time = _time_with_offset(schedule.lunch_cutoff_obj, stat_offset)
+    dinner_time = _time_with_offset(schedule.dinner_cutoff_obj, stat_offset)
 
     return [
         CronJobSpec(
@@ -71,18 +79,21 @@ def build_cron_job_specs(schedule: ScheduleConfig) -> list[CronJobSpec]:
             action=CronAction.SEND_CARDS,
             hour=send_time.hour,
             minute=send_time.minute,
+            second=send_time.second,
         ),
         CronJobSpec(
             job_id="daily_lunch_stats",
             action=CronAction.LUNCH_STATS,
             hour=lunch_time.hour,
             minute=lunch_time.minute,
+            second=lunch_time.second,
         ),
         CronJobSpec(
             job_id="daily_dinner_stats",
             action=CronAction.DINNER_STATS,
             hour=dinner_time.hour,
             minute=dinner_time.minute,
+            second=dinner_time.second,
         ),
     ]
 
@@ -105,7 +116,7 @@ def list_cron_trigger_events(
         for spec in job_specs:
             trigger_at = datetime.combine(
                 current_date,
-                time(hour=spec.hour, minute=spec.minute),
+                time(hour=spec.hour, minute=spec.minute, second=spec.second),
                 tzinfo=start_at.tzinfo,
             )
             if start_at <= trigger_at <= end_at:
@@ -207,6 +218,43 @@ class EatBotApplication:
             return
         self._booking.send_stats(target_date, Meal.DINNER)
 
+    def build_cron_preview_snapshot(self, *, target_dates: set[date]) -> CronPreviewSnapshot:
+        if self._booking is None:
+            raise RuntimeError("应用未初始化")
+        return self._booking.build_cron_preview_snapshot(target_dates=target_dates)
+
+    def preview_cron_action(
+        self,
+        action: CronAction,
+        *,
+        run_at: datetime,
+        snapshot: CronPreviewSnapshot,
+    ) -> CronActionPreview:
+        if self._config is None or self._booking is None:
+            raise RuntimeError("应用未初始化")
+
+        localized_run_at = _to_runtime_timezone(run_at, self._config.timezone)
+        target_date = localized_run_at.date()
+        weekday = _weekday_text(target_date)
+
+        if action == CronAction.SEND_CARDS:
+            will_execute, detail = self._booking.preview_daily_cards(target_date=target_date, snapshot=snapshot)
+            return CronActionPreview(
+                will_execute=will_execute,
+                detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+            )
+        if action == CronAction.LUNCH_STATS:
+            will_execute, detail = self._booking.preview_stats(meal=Meal.LUNCH, snapshot=snapshot)
+            return CronActionPreview(
+                will_execute=will_execute,
+                detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+            )
+        will_execute, detail = self._booking.preview_stats(meal=Meal.DINNER, snapshot=snapshot)
+        return CronActionPreview(
+            will_execute=will_execute,
+            detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+        )
+
     def _start_scheduler(self) -> None:
         if self._config is None or self._booking is None:
             raise RuntimeError("应用未初始化")
@@ -222,6 +270,7 @@ class EatBotApplication:
                 trigger="cron",
                 hour=spec.hour,
                 minute=spec.minute,
+                second=spec.second,
                 args=[spec.action],
                 id=spec.job_id,
                 replace_existing=True,
@@ -230,11 +279,22 @@ class EatBotApplication:
         scheduler.start()
         self._scheduler = scheduler
 
+        stats_lunch_time = _time_with_offset(
+            self._config.schedule.lunch_cutoff_obj,
+            self._config.schedule.send_stat_offset_obj,
+        )
+        stats_dinner_time = _time_with_offset(
+            self._config.schedule.dinner_cutoff_obj,
+            self._config.schedule.send_stat_offset_obj,
+        )
         logger.info(
-            "定时任务已启动: send={}, lunch_cutoff={}, dinner_cutoff={}",
+            "定时任务已启动: send={}, lunch_cutoff={}, dinner_cutoff={}, stat_offset={}, lunch_stats={}, dinner_stats={}",
             self._config.schedule.send_time,
             self._config.schedule.lunch_cutoff,
             self._config.schedule.dinner_cutoff,
+            self._config.schedule.send_stat_offset,
+            stats_lunch_time.strftime("%H:%M:%S"),
+            stats_dinner_time.strftime("%H:%M:%S"),
         )
 
     def _run_scheduled_action(self, action: CronAction) -> None:
@@ -319,10 +379,12 @@ def _parse_cli_date(raw_value: str | None, option_name: str) -> date | None:
 def _parse_cli_datetime(raw_value: str | None, option_name: str) -> datetime | None:
     if raw_value is None:
         return None
-    try:
-        return datetime.strptime(raw_value, "%Y-%m-%dT%H:%M")
-    except ValueError as exc:
-        raise typer.BadParameter(f"{option_name} 格式错误，需为 YYYY-MM-DDTHH:MM") from exc
+    for pattern in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            return datetime.strptime(raw_value, pattern)
+        except ValueError:
+            continue
+    raise typer.BadParameter(f"{option_name} 格式错误，需为 YYYY-MM-DDTHH:MM[:SS]")
 
 
 def _to_runtime_timezone(target: datetime, timezone: str) -> datetime:
@@ -330,6 +392,23 @@ def _to_runtime_timezone(target: datetime, timezone: str) -> datetime:
     if target.tzinfo is None:
         return target.replace(tzinfo=tz)
     return target.astimezone(tz)
+
+
+def _time_with_offset(base: time, offset: timedelta) -> time:
+    base_seconds = base.hour * 3600 + base.minute * 60 + base.second
+    offset_seconds = int(offset.total_seconds())
+    total_seconds = base_seconds + offset_seconds
+    if total_seconds >= 24 * 3600:
+        raise ValueError("send_stat_offset 使统计发送时间超出当天范围")
+
+    hour, remain = divmod(total_seconds, 3600)
+    minute, second = divmod(remain, 60)
+    return time(hour=hour, minute=minute, second=second)
+
+
+def _weekday_text(target_date: date) -> str:
+    weekdays = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    return weekdays[target_date.weekday()]
 
 
 def _load_runtime_config_or_exit() -> RuntimeConfig:
@@ -447,7 +526,7 @@ def send_stats_command(
 
 @dev_cli.command("listen", help="开发联调模式：仅启动长连接，不启动定时任务。")
 def dev_listen_command(
-    at: str | None = typer.Option(None, "--at", help="虚拟当前时间，格式 YYYY-MM-DDTHH:MM。"),
+    at: str | None = typer.Option(None, "--at", help="虚拟当前时间，格式 YYYY-MM-DDTHH:MM[:SS]。"),
 ) -> None:
     fake_now = _parse_cli_datetime(at, "--at")
     if fake_now is not None:
@@ -458,8 +537,8 @@ def dev_listen_command(
 
 @dev_cli.command("cron", help="在时间窗口内预览或执行应触发的 cron 任务（用于联调定时器）。")
 def dev_cron_command(
-    from_: str = typer.Option(..., "--from", help="窗口开始时间，格式 YYYY-MM-DDTHH:MM。"),
-    to: str = typer.Option(..., "--to", help="窗口结束时间，格式 YYYY-MM-DDTHH:MM。"),
+    from_: str = typer.Option(..., "--from", help="窗口开始时间，格式 YYYY-MM-DDTHH:MM[:SS]。"),
+    to: str = typer.Option(..., "--to", help="窗口结束时间，格式 YYYY-MM-DDTHH:MM[:SS]。"),
     execute: bool = typer.Option(False, "--execute", help="执行窗口内命中的任务；默认仅预览不执行。"),
 ) -> None:
     runtime_config = _load_runtime_config_or_exit()
@@ -478,14 +557,26 @@ def dev_cron_command(
         typer.echo("窗口内无可触发任务")
         return
 
-    typer.echo(f"窗口任务数: {len(events)}")
+    app = _bootstrap_application(runtime_config=runtime_config, enable_scheduler=False)
+    preview_dates = {event.trigger_at.date() for event in events}
+    snapshot = app.build_cron_preview_snapshot(target_dates=preview_dates)
+
+    typer.echo(
+        (
+            f"窗口任务数: {len(events)} | "
+            f"schedule规则数={snapshot.schedule_rules_count} | "
+            f"启用用户={snapshot.enabled_user_count} | "
+            f"统计接收人={snapshot.stats_receiver_count}"
+        )
+    )
     for event in events:
-        typer.echo(f"{event.trigger_at.isoformat()} {event.spec.job_id}")
+        preview = app.preview_cron_action(event.spec.action, run_at=event.trigger_at, snapshot=snapshot)
+        status = "执行" if preview.will_execute else "跳过"
+        typer.echo(f"{event.trigger_at.isoformat()} {event.spec.job_id} [{status}] {preview.detail}")
 
     if not execute:
         return
 
-    app = _bootstrap_application()
     for event in events:
         app.execute_cron_action(event.spec.action, run_at=event.trigger_at)
         logger.info("dev cron 任务执行完成: at={}, job={}", event.trigger_at.isoformat(), event.spec.job_id)

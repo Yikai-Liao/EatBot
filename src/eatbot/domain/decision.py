@@ -23,10 +23,10 @@ class MealPlanDecider:
         matched_rules = [rule for rule in rules if rule.start_date <= target_date <= rule.end_date]
 
         if matched_rules:
-            merged_meals: set[Meal] = set()
+            effective_meals: set[Meal] = set()
             for rule in matched_rules:
-                merged_meals |= {meal for meal in rule.meals if meal in {Meal.LUNCH, Meal.DINNER}}
-            return DailyMealPlan(date=target_date, meals=merged_meals)
+                effective_meals = {meal for meal in rule.meals if meal in {Meal.LUNCH, Meal.DINNER}}
+            return DailyMealPlan(date=target_date, meals=effective_meals)
 
         if target_date.weekday() >= 5:
             return DailyMealPlan(date=target_date, meals=set())

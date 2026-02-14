@@ -4,6 +4,7 @@
 - 基于飞书机器人和飞书多维表格，实现工作日自动发起食堂预约。
 - 用户通过消息卡片按钮选择餐次，系统自动写入和更新用餐记录。
 - 在每餐预约截止后自动发送统计结果给指定接收人。
+- 统计发送时间 = 截止时间 + `schedule.send_stat_offset`（支持秒级偏移）。
 
 ## 2. 业务范围与约束
 - 数据存储：仅使用飞书多维表格，不使用本地数据库。
@@ -17,14 +18,17 @@
 - 卡片提供三个按钮：午餐、晚餐、刷新。
 - 点击按钮即切换对应餐次的选中状态，并立即回写记录与刷新卡片高亮状态。
 - 点击“刷新”会重新读取当日记录并同步按钮高亮，不会修改表格。
+- 每次点击都会重新读取“用餐定时配置”与“用餐记录”，不信任旧卡片上的历史状态。
 - 默认推荐来源于“用餐人员配置”表中的“餐食偏好”。
 
 ### 3.2 记录创建与更新
 - 发卡后按默认偏好写入“用餐记录”。
 - 发卡时按钮状态优先以“用餐记录”中的当日已有记录为准；仅当无记录时才回落到默认偏好。
 - 用户点击卡片按钮后，按最终选择更新“用餐记录”。
+- 若某餐在当日“用餐定时配置”中被移除，则点击时会自动将该餐回写为取消预约，并返回最新按钮状态。
 - 若取消则更新该餐对应记录的“预约状态”为未勾选。
 - 不写“用餐人员配置”表（偏好表只由管理员维护）。
+- 冲突数据处理统一按“后记录优先”：同一用户配置、同一统计接收人、同一日期+用户+餐次记录发生重复时，以后出现的记录为准。
 
 ### 3.3 截止时间控制
 - 每天在配置截止时间后，不允许修改卡片状态。
@@ -38,6 +42,7 @@
 - 默认规则：仅周一到周五发送，周末不发。
 - 覆盖规则：以“用餐定时配置”表为最高优先级。
 - 当命中开始/结束日期闭区间时，以“当日餐食包含”决定是否发卡和发哪一餐。
+- 冲突规则：同一天命中多条配置时，以表格中更靠后的记录覆盖前面的记录（后记录优先）。
 
 ## 4. 数据表与字段
 ## 4.1 表链接
@@ -77,7 +82,8 @@
 - `config.shared.toml`：可提交，保存全局时区、字段名映射、定时参数等共享配置。
 - `config.local.toml`：本地私密，保存 app_id、app_secret、app_token、wiki_token、tables 与日志配置。
 - `timezone`（根级）用于定义全局业务时区，表格日期解析、定时任务与统计口径都按该时区计算。
-- `config.shared.toml` 中 `schedule` 段仅用于配置发卡时间和午/晚餐截止时间。
+- `config.shared.toml` 中 `schedule` 段用于配置发卡时间、午/晚餐截止时间、统计偏移 `send_stat_offset` 以及用餐定时配置缓存时长 `schedule_cache_ttl_minutes`。
+- 用餐定时配置缓存默认 30 分钟；每日发卡任务开始前会强制刷新一次缓存，单批用户发送过程不重复拉表。
 - 加载建议：先加载 `config.shared.toml`，再用 `config.local.toml` 覆盖。
 - `config.local.toml` 日志配置示例：
 ```toml
@@ -154,19 +160,19 @@ eatbot
 - `eatbot send stats --meal lunch|dinner|all [--date YYYY-MM-DD]`
 - 一次性发送统计消息，`--date` 不传默认当天。
 
-- `eatbot dev listen [--at YYYY-MM-DDTHH:MM]`
+- `eatbot dev listen [--at YYYY-MM-DDTHH:MM[:SS]]`
 - 开发联调模式：仅启动长连接，不启动定时任务。
 - `--at` 用于注入虚拟当前时间（截止逻辑联调）。
 
-- `eatbot dev cron --from YYYY-MM-DDTHH:MM --to YYYY-MM-DDTHH:MM [--execute]`
+- `eatbot dev cron --from YYYY-MM-DDTHH:MM[:SS] --to YYYY-MM-DDTHH:MM[:SS] [--execute]`
 - 定时器窗口验证命令。
 - 默认 dry-run：仅输出窗口内应触发的任务。
 - 加 `--execute`：按时间顺序执行窗口内应触发任务。
 
 ### 9.3 参数语义
 - `--date`：业务日期（发卡/发统计对应哪一天）。
-- `--at`：虚拟当前时间（仅 `dev listen`）。
-- `--from`/`--to`：定时器验证窗口（仅 `dev cron`）。
+- `--at`：虚拟当前时间（仅 `dev listen`，支持秒）。
+- `--from`/`--to`：定时器验证窗口（仅 `dev cron`，支持秒）。
 
 ### 9.4 调用示例
 - `uv run eatbot check`
@@ -174,9 +180,9 @@ eatbot
 - `uv run eatbot run --log-level debug`
 - `uv run eatbot send cards --date 2026-02-14`
 - `uv run eatbot send stats --meal lunch --date 2026-02-14`
-- `uv run eatbot dev listen --at 2026-02-14T10:31`
-- `uv run eatbot dev cron --from 2026-02-14T09:00 --to 2026-02-14T11:00`
-- `uv run eatbot dev cron --from 2026-02-14T09:00 --to 2026-02-14T11:00 --execute`
+- `uv run eatbot dev listen --at 2026-02-14T10:31:30`
+- `uv run eatbot dev cron --from 2026-02-14T09:00:00 --to 2026-02-14T11:00:00`
+- `uv run eatbot dev cron --from 2026-02-14T09:00:00 --to 2026-02-14T11:00:00 --execute`
 
 ### 9.5 旧参数迁移
 - `--check` -> `check`
@@ -192,5 +198,5 @@ eatbot
 
 ## 10. 当前验证状态（2026-02-14）
 - 核心命令可用：`uv run eatbot --help`、`uv run eatbot run --help`。
-- 自动化测试通过：`uv run pytest -q`，当前为 `33 passed`。
+- 自动化测试通过：`uv run pytest -q`，当前为 `48 passed`。
 - 已知 warning 主要来自 `lark_oapi` 上游依赖内部弃用项，不影响当前功能运行。

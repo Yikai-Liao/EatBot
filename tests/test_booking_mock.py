@@ -11,7 +11,7 @@ from unittest.mock import Mock, call, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from eatbot.config import RuntimeConfig
-from eatbot.domain.models import Meal, UserProfile
+from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
 from eatbot.services.booking import BookingService
 
 
@@ -102,6 +102,9 @@ class TestBookingServiceMock:
         self.repo = Mock()
         self.repo.upsert_meal_record.return_value = "rec_default"
         self.repo.list_user_meal_rows.return_value = []
+        self.repo.list_schedule_rules.return_value = []
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender"), make_user(open_id="ou_test")]
+        self.repo.list_stats_receiver_open_ids.return_value = []
         self.im = Mock()
         self.service = BookingService(config=build_config(), repository=self.repo, im=self.im)
 
@@ -140,6 +143,34 @@ class TestBookingServiceMock:
         assert status_by_meal["午餐"] == "default"
         assert status_by_meal["晚餐"] == "primary"
 
+    def test_send_daily_cards_rule_meals_override_default_preference(self) -> None:
+        target_date = date(2026, 2, 12)
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(
+                start_date=target_date,
+                end_date=target_date,
+                meals={Meal.LUNCH},
+            )
+        ]
+        user = make_user()
+        user.meal_preferences = {Meal.LUNCH, Meal.DINNER}
+        self.repo.list_user_profiles.return_value = [user]
+
+        self.service.send_daily_cards(target_date=target_date)
+
+        self.repo.upsert_meal_record.assert_called_once_with(
+            target_date=target_date,
+            open_id="ou_test",
+            meal=Meal.LUNCH,
+            price=Decimal("20"),
+        )
+        sent_card = self.im.send_interactive.call_args.kwargs["card_json"]
+        payload = json.loads(sent_card)
+        meal_buttons = [
+            item for item in payload["body"]["elements"] if item.get("tag") == "button" and item["text"]["content"] in {"午餐", "晚餐"}
+        ]
+        assert [item["text"]["content"] for item in meal_buttons] == ["午餐"]
+
     def test_send_daily_cards_continue_when_one_user_send_failed(self) -> None:
         self.repo.list_schedule_rules.return_value = []
         self.repo.list_user_profiles.return_value = [
@@ -167,6 +198,40 @@ class TestBookingServiceMock:
                 ),
             ]
         )
+
+    def test_preview_daily_cards_reports_skip_on_weekend_default_rule(self) -> None:
+        target_date = date(2026, 2, 14)
+        self.repo.list_schedule_rules.return_value = []
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_1", enabled=True)]
+        self.repo.list_stats_receiver_open_ids.return_value = ["ou_stat_1"]
+
+        snapshot = self.service.build_cron_preview_snapshot(target_dates={target_date})
+        will_execute, detail = self.service.preview_daily_cards(target_date=target_date, snapshot=snapshot)
+
+        assert snapshot.schedule_rules_count == 0
+        assert snapshot.enabled_user_count == 1
+        assert snapshot.stats_receiver_count == 1
+        assert will_execute is False
+        assert "规则结果=不发送" in detail
+
+    def test_preview_daily_cards_reports_execute_when_rule_matches(self) -> None:
+        target_date = date(2026, 2, 14)
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(
+                start_date=target_date,
+                end_date=target_date,
+                meals={Meal.DINNER},
+            )
+        ]
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_1", enabled=True)]
+        self.repo.list_stats_receiver_open_ids.return_value = []
+
+        snapshot = self.service.build_cron_preview_snapshot(target_dates={target_date})
+        will_execute, detail = self.service.preview_daily_cards(target_date=target_date, snapshot=snapshot)
+
+        assert will_execute is True
+        assert "规则餐次=晚餐" in detail
+        assert "启用用户=1" in detail
 
     def test_handle_message_event_triggers_today_card(self) -> None:
         with patch.object(self.service, "send_card_to_user_today") as mocked:
@@ -276,9 +341,14 @@ class TestBookingServiceMock:
             item for item in data_obj["body"]["elements"] if item.get("tag") == "button" and item["text"]["content"] in {"午餐", "晚餐"}
         ]
         assert len(meal_buttons) == 2
-        assert all(button["type"] == "primary" for button in meal_buttons)
+        status_by_meal = {item["text"]["content"]: item["type"] for item in meal_buttons}
+        assert status_by_meal["午餐"] == "default"
+        assert status_by_meal["晚餐"] == "primary"
 
     def test_handle_card_frame_action_works_for_card_message_type(self) -> None:
+        self.repo.list_user_meal_rows.return_value = [
+            make_meal_row(Meal.LUNCH, reservation_status=True, record_id="rec_lunch")
+        ]
         data = SimpleNamespace(
             open_id="ou_sender",
             action=SimpleNamespace(
@@ -306,6 +376,55 @@ class TestBookingServiceMock:
         )
         assert response["toast"]["type"] == "info"
         assert response["card"]["type"] == "raw"
+
+    def test_handle_card_action_revalidate_schedule_and_cancel_disallowed_meal(self) -> None:
+        target_date = date(2099, 1, 1)
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(
+                start_date=target_date,
+                end_date=target_date,
+                meals={Meal.LUNCH},
+            )
+        ]
+        self.repo.list_user_meal_rows.side_effect = [
+            [make_meal_row(Meal.DINNER, reservation_status=True, record_id="rec_dinner_existing")],
+            [make_meal_row(Meal.DINNER, reservation_status=False, record_id="rec_dinner_existing")],
+        ]
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["晚餐"],
+                        toggle_meal="晚餐",
+                        meal_record_ids={"午餐": None, "晚餐": "rec_dinner_existing"},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = self.service.handle_card_action(data)
+
+        self.repo.cancel_meal_record.assert_called_once_with(
+            target_date=target_date,
+            open_id="ou_sender",
+            meal=Meal.DINNER,
+            record_id="rec_dinner_existing",
+            prefer_direct=True,
+        )
+        self.repo.upsert_meal_record.assert_not_called()
+        assert response.toast.type == "info"
+        assert "不可预约" in response.toast.content
+        payload = response.card.data
+        meal_buttons = [
+            item for item in payload["body"]["elements"] if item.get("tag") == "button" and item["text"]["content"] in {"午餐", "晚餐"}
+        ]
+        assert [item["text"]["content"] for item in meal_buttons] == ["午餐"]
 
     def test_handle_card_action_refresh_state_only_reads_records(self) -> None:
         self.repo.list_user_meal_rows.return_value = [
@@ -420,6 +539,7 @@ class TestBookingServiceMock:
 
         assert response.toast.type == "error"
         assert "已过截止时间" in response.toast.content
+        assert "联系管理员人工处理" in response.toast.content
 
     def test_handle_card_action_accepts_when_before_cutoff_with_simulated_now(self) -> None:
         service = BookingService(
@@ -450,3 +570,41 @@ class TestBookingServiceMock:
 
         assert response.toast.type == "info"
         assert response.toast.content == "预约已更新"
+
+    def test_schedule_rule_cache_ttl_and_force_refresh(self) -> None:
+        current_now = datetime(2099, 1, 1, 9, 0)
+
+        def now_provider() -> datetime:
+            return current_now
+
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            now_provider=now_provider,
+        )
+        self.repo.list_schedule_rules.side_effect = [
+            [],
+            [
+                MealScheduleRule(
+                    start_date=date(2099, 1, 2),
+                    end_date=date(2099, 1, 2),
+                    meals={Meal.LUNCH},
+                )
+            ],
+            [],
+        ]
+
+        first = service._list_schedule_rules()
+        second = service._list_schedule_rules()
+        assert first == []
+        assert second == []
+        assert self.repo.list_schedule_rules.call_count == 1
+
+        current_now = datetime(2099, 1, 1, 9, 31)
+        third = service._list_schedule_rules()
+        assert len(third) == 1
+        assert self.repo.list_schedule_rules.call_count == 2
+
+        service._list_schedule_rules(force_refresh=True)
+        assert self.repo.list_schedule_rules.call_count == 3

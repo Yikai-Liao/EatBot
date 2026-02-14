@@ -289,3 +289,115 @@ def test_invalid_timezone_raise_error() -> None:
 
         with pytest.raises(ConfigError):
             load_runtime_config(shared_file, local_file)
+
+
+def test_invalid_send_stat_offset_raise_error() -> None:
+    shared = textwrap.dedent(
+        """
+        app_token = "app"
+
+        [tables]
+        user_config = "t1"
+        meal_schedule = "t2"
+        meal_record = "t3"
+        stats_receivers = "t4"
+
+        [field_names.user_config]
+        display_name = "A"
+        user = "B"
+        meal_preference = "C"
+        lunch_price = "D"
+        dinner_price = "E"
+        enabled = "F"
+
+        [field_names.meal_schedule]
+        start_date = "A"
+        end_date = "B"
+        meals = "C"
+        remark = "D"
+
+        [field_names.meal_record]
+        date = "A"
+        user = "B"
+        meal_type = "C"
+        price = "D"
+        reservation_status = "E"
+
+        [field_names.stats_receivers]
+        user = "A"
+
+        [schedule]
+        send_stat_offset = "00:61:00"
+        """
+    ).strip()
+    local = textwrap.dedent(
+        """
+        app_id = "id"
+        app_secret = "secret"
+        """
+    ).strip()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shared_file = Path(tmp) / "config.shared.toml"
+        local_file = Path(tmp) / "config.local.toml"
+        shared_file.write_text(shared, encoding="utf-8")
+        local_file.write_text(local, encoding="utf-8")
+
+        with pytest.raises(ConfigError):
+            load_runtime_config(shared_file, local_file)
+
+
+def test_invalid_schedule_cache_ttl_raise_error() -> None:
+    shared = textwrap.dedent(
+        """
+        app_token = "app"
+
+        [tables]
+        user_config = "t1"
+        meal_schedule = "t2"
+        meal_record = "t3"
+        stats_receivers = "t4"
+
+        [field_names.user_config]
+        display_name = "A"
+        user = "B"
+        meal_preference = "C"
+        lunch_price = "D"
+        dinner_price = "E"
+        enabled = "F"
+
+        [field_names.meal_schedule]
+        start_date = "A"
+        end_date = "B"
+        meals = "C"
+        remark = "D"
+
+        [field_names.meal_record]
+        date = "A"
+        user = "B"
+        meal_type = "C"
+        price = "D"
+        reservation_status = "E"
+
+        [field_names.stats_receivers]
+        user = "A"
+
+        [schedule]
+        schedule_cache_ttl_minutes = 0
+        """
+    ).strip()
+    local = textwrap.dedent(
+        """
+        app_id = "id"
+        app_secret = "secret"
+        """
+    ).strip()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shared_file = Path(tmp) / "config.shared.toml"
+        local_file = Path(tmp) / "config.local.toml"
+        shared_file.write_text(shared, encoding="utf-8")
+        local_file.write_text(local, encoding="utf-8")
+
+        with pytest.raises(ConfigError):
+            load_runtime_config(shared_file, local_file)
