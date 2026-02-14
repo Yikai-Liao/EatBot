@@ -360,12 +360,12 @@ def _bootstrap_application(
 
 
 cli = typer.Typer(
-    help="EatBot CLI",
+    help="EatBot CLI（无子命令时等价于 `eatbot run`）",
     no_args_is_help=False,
     add_completion=False,
 )
-send_cli = typer.Typer(help="一次性发送命令", no_args_is_help=True)
-dev_cli = typer.Typer(help="开发联调命令", no_args_is_help=True)
+send_cli = typer.Typer(help="一次性发送命令（不常驻）", no_args_is_help=True)
+dev_cli = typer.Typer(help="开发联调命令（测试模式）", no_args_is_help=True)
 cli.add_typer(send_cli, name="send")
 cli.add_typer(dev_cli, name="dev")
 
@@ -377,19 +377,19 @@ def root_callback(ctx: typer.Context) -> None:
         _run_service(log_level=LogLevelOption.INFO)
 
 
-@cli.command("check")
+@cli.command("check", help="检查配置、字段映射与飞书表结构是否可用，不启动长连接和定时任务。")
 def check_command() -> None:
     _bootstrap_application()
     logger.info("校验成功")
 
 
-@cli.command("run")
+@cli.command("run", help="生产运行模式：启动长连接与定时任务并常驻。")
 def run_command(
     log_level: LogLevelOption = typer.Option(
         LogLevelOption.INFO,
         "--log-level",
         case_sensitive=False,
-        help="日志级别: debug|info|warning|error",
+        help="日志级别（同时作用于终端与文件日志），默认 info。",
     ),
 ) -> None:
     _run_service(log_level=log_level)
@@ -406,9 +406,9 @@ def _run_service(*, log_level: LogLevelOption) -> None:
     app.run()
 
 
-@send_cli.command("cards")
+@send_cli.command("cards", help="一次性发送预约卡片，不启动常驻服务。")
 def send_cards_command(
-    target_date: str | None = typer.Option(None, "--date", help="业务日期，格式 YYYY-MM-DD"),
+    target_date: str | None = typer.Option(None, "--date", help="业务日期，格式 YYYY-MM-DD，默认当天。"),
 ) -> None:
     parsed_date = _parse_cli_date(target_date, "--date")
     app = _bootstrap_application()
@@ -419,10 +419,15 @@ def send_cards_command(
         logger.info("指定日期卡片发送完成: {}", parsed_date.isoformat())
 
 
-@send_cli.command("stats")
+@send_cli.command("stats", help="一次性发送统计消息，不启动常驻服务。")
 def send_stats_command(
-    meal: StatsMealOption = typer.Option(..., "--meal", help="统计餐次: lunch|dinner|all", case_sensitive=False),
-    target_date: str | None = typer.Option(None, "--date", help="业务日期，格式 YYYY-MM-DD"),
+    meal: StatsMealOption = typer.Option(
+        ...,
+        "--meal",
+        help="统计餐次：lunch|dinner|all（all 表示午晚餐都发送）。",
+        case_sensitive=False,
+    ),
+    target_date: str | None = typer.Option(None, "--date", help="业务日期，格式 YYYY-MM-DD，默认当天。"),
 ) -> None:
     parsed_date = _parse_cli_date(target_date, "--date")
     app = _bootstrap_application()
@@ -440,9 +445,9 @@ def send_stats_command(
         logger.info("统计发送完成: meal={} date={}", meal.value, parsed_date.isoformat())
 
 
-@dev_cli.command("listen")
+@dev_cli.command("listen", help="开发联调模式：仅启动长连接，不启动定时任务。")
 def dev_listen_command(
-    at: str | None = typer.Option(None, "--at", help="虚拟当前时间，格式 YYYY-MM-DDTHH:MM"),
+    at: str | None = typer.Option(None, "--at", help="虚拟当前时间，格式 YYYY-MM-DDTHH:MM。"),
 ) -> None:
     fake_now = _parse_cli_datetime(at, "--at")
     if fake_now is not None:
@@ -451,11 +456,11 @@ def dev_listen_command(
     app.run()
 
 
-@dev_cli.command("cron")
+@dev_cli.command("cron", help="在时间窗口内预览或执行应触发的 cron 任务（用于联调定时器）。")
 def dev_cron_command(
-    from_: str = typer.Option(..., "--from", help="窗口开始时间，格式 YYYY-MM-DDTHH:MM"),
-    to: str = typer.Option(..., "--to", help="窗口结束时间，格式 YYYY-MM-DDTHH:MM"),
-    execute: bool = typer.Option(False, "--execute", help="执行窗口内命中的任务；默认仅预览"),
+    from_: str = typer.Option(..., "--from", help="窗口开始时间，格式 YYYY-MM-DDTHH:MM。"),
+    to: str = typer.Option(..., "--to", help="窗口结束时间，格式 YYYY-MM-DDTHH:MM。"),
+    execute: bool = typer.Option(False, "--execute", help="执行窗口内命中的任务；默认仅预览不执行。"),
 ) -> None:
     runtime_config = _load_runtime_config_or_exit()
     parsed_from = _parse_cli_datetime(from_, "--from")
