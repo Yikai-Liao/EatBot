@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from eatbot.adapters.feishu_clients import FieldMeta, TableFieldMapping
 from eatbot.config import RuntimeConfig
 from eatbot.domain.models import Meal
-from eatbot.services.repositories import BitableRepository
+from eatbot.services.repositories import BitableRepository, MealFeeSummary
 
 
 def build_config() -> RuntimeConfig:
@@ -25,6 +25,7 @@ def build_config() -> RuntimeConfig:
                 "meal_schedule": "tbl_schedule",
                 "meal_record": "tbl_record",
                 "stats_receivers": "tbl_stats",
+                "meal_fee_archive": "tbl_archive",
             },
             "field_names": {
                 "user_config": {
@@ -51,6 +52,12 @@ def build_config() -> RuntimeConfig:
                 "stats_receivers": {
                     "user": "人员",
                 },
+                "meal_fee_archive": {
+                    "user": "用餐者",
+                    "start_date": "开始日期",
+                    "end_date": "结束日期",
+                    "fee": "费用",
+                },
             },
         }
     )
@@ -59,9 +66,22 @@ def build_config() -> RuntimeConfig:
 class _FakeBitable:
     def __init__(self, records_by_table: dict[str, list[SimpleNamespace]]) -> None:
         self._records_by_table = records_by_table
+        self.updated_records: list[tuple[str, str, dict]] = []
+        self.created_records: list[tuple[str, dict]] = []
 
     def list_records(self, table_id: str) -> list[SimpleNamespace]:
         return list(self._records_by_table.get(table_id, []))
+
+    def update_record(self, table_id: str, record_id: str, fields: dict) -> SimpleNamespace:
+        self.updated_records.append((table_id, record_id, fields))
+        return SimpleNamespace(record_id=record_id, fields=fields)
+
+    def create_record(self, table_id: str, fields: dict) -> SimpleNamespace:
+        self.created_records.append((table_id, fields))
+        record_id = f"rec_new_{len(self.created_records)}"
+        record = SimpleNamespace(record_id=record_id, fields=fields)
+        self._records_by_table.setdefault(table_id, []).append(record)
+        return record
 
 
 def _build_mappings() -> dict[str, TableFieldMapping]:
@@ -114,6 +134,16 @@ def _build_mappings() -> dict[str, TableFieldMapping]:
             "tbl_stats",
             {
                 "user": "人员",
+            },
+        ),
+        "meal_fee_archive": mapping(
+            "meal_fee_archive",
+            "tbl_archive",
+            {
+                "user": "用餐者",
+                "start_date": "开始日期",
+                "end_date": "结束日期",
+                "fee": "费用",
             },
         ),
     }
@@ -223,3 +253,166 @@ def test_meal_rows_conflict_use_later_record_for_user_and_stats() -> None:
     assert rows[0].record_id == "r_new"
     assert rows[0].reservation_status is False
     assert count == 1
+
+
+def test_cancel_meal_record_only_updates_reservation_status_without_overwriting_price() -> None:
+    target_date = date(2026, 2, 14)
+    bitable = _FakeBitable(
+        {
+            "tbl_record": [
+                SimpleNamespace(
+                    record_id="r1",
+                    fields={
+                        "日期": "2026-02-14",
+                        "用餐者": [{"id": "ou_1"}],
+                        "餐食类型": Meal.LUNCH.value,
+                        "价格": "20",
+                        "预约状态": True,
+                    },
+                ),
+            ]
+        }
+    )
+    repo = BitableRepository(config=build_config(), bitable=bitable, mappings=_build_mappings())
+
+    kept_id = repo.cancel_meal_record(
+        target_date=target_date,
+        open_id="ou_1",
+        meal=Meal.LUNCH,
+        record_id="r1",
+        prefer_direct=True,
+    )
+
+    assert kept_id == "r1"
+    assert bitable.updated_records[-1][0] == "tbl_record"
+    assert bitable.updated_records[-1][1] == "r1"
+    assert bitable.updated_records[-1][2] == {"预约状态": False}
+
+
+def test_list_meal_fee_summaries_use_closed_interval_and_later_record() -> None:
+    bitable = _FakeBitable(
+        {
+            "tbl_record": [
+                SimpleNamespace(
+                    record_id="r1_old",
+                    fields={
+                        "日期": "2026-01-16",
+                        "用餐者": [{"id": "ou_1"}],
+                        "餐食类型": Meal.LUNCH.value,
+                        "价格": "20",
+                        "预约状态": True,
+                    },
+                ),
+                SimpleNamespace(
+                    record_id="r1_new",
+                    fields={
+                        "日期": "2026-01-16",
+                        "用餐者": [{"id": "ou_1"}],
+                        "餐食类型": Meal.LUNCH.value,
+                        "价格": "25",
+                        "预约状态": True,
+                    },
+                ),
+                SimpleNamespace(
+                    record_id="r2_old",
+                    fields={
+                        "日期": "2026-01-20",
+                        "用餐者": [{"id": "ou_1"}],
+                        "餐食类型": Meal.DINNER.value,
+                        "价格": "30",
+                        "预约状态": True,
+                    },
+                ),
+                SimpleNamespace(
+                    record_id="r2_new",
+                    fields={
+                        "日期": "2026-01-20",
+                        "用餐者": [{"id": "ou_1"}],
+                        "餐食类型": Meal.DINNER.value,
+                        "价格": "0",
+                        "预约状态": False,
+                    },
+                ),
+                SimpleNamespace(
+                    record_id="r3",
+                    fields={
+                        "日期": "2026-02-15",
+                        "用餐者": [{"id": "ou_1"}],
+                        "餐食类型": Meal.LUNCH.value,
+                        "价格": "22",
+                        "预约状态": True,
+                    },
+                ),
+                SimpleNamespace(
+                    record_id="r4",
+                    fields={
+                        "日期": "2026-02-01",
+                        "用餐者": [{"id": "ou_2"}],
+                        "餐食类型": Meal.LUNCH.value,
+                        "价格": "18",
+                        "预约状态": True,
+                    },
+                ),
+                SimpleNamespace(
+                    record_id="r5",
+                    fields={
+                        "日期": "2026-02-16",
+                        "用餐者": [{"id": "ou_2"}],
+                        "餐食类型": Meal.LUNCH.value,
+                        "价格": "99",
+                        "预约状态": True,
+                    },
+                ),
+            ]
+        }
+    )
+    repo = BitableRepository(config=build_config(), bitable=bitable, mappings=_build_mappings())
+
+    summaries = repo.list_meal_fee_summaries(
+        start_date=date(2026, 1, 16),
+        end_date=date(2026, 2, 15),
+    )
+
+    assert summaries == [
+        MealFeeSummary(open_id="ou_1", total_fee=Decimal("47")),
+        MealFeeSummary(open_id="ou_2", total_fee=Decimal("18")),
+    ]
+
+
+def test_upsert_meal_fee_archive_record_update_later_conflict_row() -> None:
+    bitable = _FakeBitable(
+        {
+            "tbl_archive": [
+                SimpleNamespace(
+                    record_id="a_old",
+                    fields={
+                        "用餐者": [{"id": "ou_1"}],
+                        "开始日期": "2026-01-16",
+                        "结束日期": "2026-02-15",
+                        "费用": "40",
+                    },
+                ),
+                SimpleNamespace(
+                    record_id="a_new",
+                    fields={
+                        "用餐者": [{"id": "ou_1"}],
+                        "开始日期": "2026-01-16",
+                        "结束日期": "2026-02-15",
+                        "费用": "41",
+                    },
+                ),
+            ]
+        }
+    )
+    repo = BitableRepository(config=build_config(), bitable=bitable, mappings=_build_mappings())
+
+    record_id = repo.upsert_meal_fee_archive_record(
+        open_id="ou_1",
+        start_date=date(2026, 1, 16),
+        end_date=date(2026, 2, 15),
+        fee=Decimal("45"),
+    )
+
+    assert record_id == "a_new"
+    assert bitable.updated_records[-1][0] == "tbl_archive"
+    assert bitable.updated_records[-1][1] == "a_new"

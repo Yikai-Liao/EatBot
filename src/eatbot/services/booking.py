@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
 import time as mono_time
@@ -31,6 +32,22 @@ class CronPreviewSnapshot:
     stats_receiver_count: int
     rules_by_date: dict[date, set[Meal]]
     matched_rule_count_by_date: dict[date, int]
+
+
+@dataclass(slots=True, frozen=True)
+class MealFeeArchiveWindow:
+    run_date: date
+    start_date: date
+    end_date: date
+
+
+@dataclass(slots=True, frozen=True)
+class MealFeeArchiveSummary:
+    run_date: date
+    start_date: date
+    end_date: date
+    user_count: int
+    total_fee: Decimal
 
 
 class BookingService:
@@ -157,6 +174,90 @@ class BookingService:
         if snapshot.stats_receiver_count <= 0:
             return False, f"餐次={meal.value}; 统计接收人=0"
         return True, f"餐次={meal.value}; 统计接收人={snapshot.stats_receiver_count}"
+
+    def preview_fee_archive(self, *, target_date: date) -> tuple[bool, str]:
+        window = self._build_meal_fee_archive_window(target_date)
+        if target_date != window.run_date:
+            return (
+                False,
+                f"非归档日; 本月归档日={window.run_date.isoformat()}",
+            )
+        return (
+            True,
+            (
+                f"归档区间={window.start_date.isoformat()}~"
+                f"{window.end_date.isoformat()}（闭区间）"
+            ),
+        )
+
+    def archive_meal_fees(self, *, target_date: date | None = None) -> MealFeeArchiveSummary | None:
+        target = target_date or self._now().date()
+        window = self._build_meal_fee_archive_window(target)
+        if target != window.run_date:
+            logger.debug(
+                "今日非餐费归档日，跳过执行: target={} expected={}",
+                target.isoformat(),
+                window.run_date.isoformat(),
+            )
+            return None
+
+        summaries = self._repository.list_meal_fee_summaries(start_date=window.start_date, end_date=window.end_date)
+        amount_by_open_id = {item.open_id: item.total_fee for item in summaries}
+        users = self._repository.list_user_profiles()
+        enabled_open_ids = {user.open_id for user in users if user.enabled}
+        target_open_ids = sorted(set(amount_by_open_id.keys()) | enabled_open_ids)
+
+        total_fee = Decimal("0")
+        for open_id in target_open_ids:
+            fee = amount_by_open_id.get(open_id, Decimal("0"))
+            total_fee += fee
+            self._repository.upsert_meal_fee_archive_record(
+                open_id=open_id,
+                start_date=window.start_date,
+                end_date=window.end_date,
+                fee=fee,
+            )
+            try:
+                self._im.send_text(
+                    open_id,
+                    (
+                        f"餐费归档通知：{window.start_date.isoformat()}~{window.end_date.isoformat()}（闭区间），"
+                        f"你的餐费合计 {_format_decimal(fee)} 元。"
+                    ),
+                )
+            except Exception:
+                logger.exception("发送餐费归档通知失败: open_id={}", open_id)
+
+        receivers = self._repository.list_stats_receiver_open_ids()
+        if receivers:
+            admin_text = (
+                f"餐费归档表已更新：{window.start_date.isoformat()}~"
+                f"{window.end_date.isoformat()}（闭区间），"
+                f"总收款 {_format_decimal(total_fee)} 元。"
+            )
+            for open_id in receivers:
+                try:
+                    self._im.send_text(open_id, admin_text)
+                except Exception:
+                    logger.exception("发送餐费归档管理员通知失败: open_id={}", open_id)
+        else:
+            logger.info("无统计接收人配置，跳过餐费归档管理员通知")
+
+        logger.info(
+            "餐费归档完成: run_date={} start={} end={} users={} total_fee={}",
+            window.run_date.isoformat(),
+            window.start_date.isoformat(),
+            window.end_date.isoformat(),
+            len(target_open_ids),
+            _format_decimal(total_fee),
+        )
+        return MealFeeArchiveSummary(
+            run_date=window.run_date,
+            start_date=window.start_date,
+            end_date=window.end_date,
+            user_count=len(target_open_ids),
+            total_fee=total_fee,
+        )
 
     def handle_message_event(self, data: P2ImMessageReceiveV1) -> None:
         message = data.event.message if data and data.event else None
@@ -603,6 +704,30 @@ class BookingService:
             return now.time() < self._config.schedule.dinner_cutoff_obj
         return False
 
+    def _build_meal_fee_archive_window(self, target_date: date) -> MealFeeArchiveWindow:
+        day_of_month = self._config.schedule.fee_archive_day_of_month
+        run_date = _resolve_monthly_day(
+            year=target_date.year,
+            month=target_date.month,
+            day_of_month=day_of_month,
+        )
+        if target_date.month == 1:
+            prev_year = target_date.year - 1
+            prev_month = 12
+        else:
+            prev_year = target_date.year
+            prev_month = target_date.month - 1
+        prev_run_date = _resolve_monthly_day(
+            year=prev_year,
+            month=prev_month,
+            day_of_month=day_of_month,
+        )
+        return MealFeeArchiveWindow(
+            run_date=run_date,
+            start_date=prev_run_date + timedelta(days=1),
+            end_date=run_date,
+        )
+
     def _now(self) -> datetime:
         if self._now_provider is None:
             return datetime.now(self._timezone)
@@ -689,3 +814,18 @@ def _format_meals(meals: set[Meal]) -> str:
     if not ordered:
         return "-"
     return "、".join(meal.value for meal in ordered)
+
+
+def _resolve_monthly_day(*, year: int, month: int, day_of_month: int) -> date:
+    last_day = monthrange(year, month)[1]
+    return date(year, month, min(day_of_month, last_day))
+
+
+def _format_decimal(value: Decimal) -> str:
+    normalized = value.normalize()
+    text = format(normalized, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if not text:
+        return "0"
+    return text

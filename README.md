@@ -4,6 +4,7 @@
 - 基于飞书机器人和飞书多维表格，实现工作日自动发起食堂预约。
 - 用户通过消息卡片按钮选择餐次，系统自动写入和更新用餐记录。
 - 在每餐预约截止后自动发送统计结果给指定接收人。
+- 每月按配置归档日汇总餐费，写入归档表并发送用户/管理员通知。
 - 统计发送时间 = 截止时间 + `schedule.send_stat_offset`（支持秒级偏移）。
 
 ## 2. 业务范围与约束
@@ -26,7 +27,7 @@
 - 发卡时按钮状态优先以“用餐记录”中的当日已有记录为准；仅当无记录时才回落到默认偏好。
 - 用户点击卡片按钮后，按最终选择更新“用餐记录”。
 - 若某餐在当日“用餐定时配置”中被移除，则点击时会自动将该餐回写为取消预约，并返回最新按钮状态。
-- 若取消则更新该餐对应记录的“预约状态”为未勾选。
+- 若取消则仅更新该餐对应记录的“预约状态”为未勾选，不修改“价格”字段。
 - 不写“用餐人员配置”表（偏好表只由管理员维护）。
 - 冲突数据处理统一按“后记录优先”：同一用户配置、同一统计接收人、同一日期+用户+餐次记录发生重复时，以后出现的记录为准。
 
@@ -44,12 +45,20 @@
 - 当命中开始/结束日期闭区间时，以“当日餐食包含”决定是否发卡和发哪一餐。
 - 冲突规则：同一天命中多条配置时，以表格中更靠后的记录覆盖前面的记录（后记录优先）。
 
+### 3.6 月度餐费归档
+- 每天在 `schedule.fee_archive_time` 触发归档检查，仅在当月归档日执行。
+- 归档日由 `schedule.fee_archive_day_of_month` 指定（1-31）；若当月无该日，则自动回退到当月最后一天。
+- 归档区间按闭区间处理：`[上月归档日 + 1 天, 本月归档日]`。
+- 执行时汇总区间内“用餐记录”有效金额，按人写入“餐费归档”表，并向每位用户发送金额通知。
+- 同时向“统计信息接收人员”发送归档完成通知（包含区间和总收款）。
+
 ## 4. 数据表与字段
 ## 4.1 表链接
 - 用餐人员配置：https://ycnw20znloxr.feishu.cn/wiki/QC07wNez9iSgZhk6rg7cOW2PnNb?table=tblrulMIAx0vnkHu&view=vewIkQTtpb
 - 用餐定时配置：https://ycnw20znloxr.feishu.cn/wiki/QC07wNez9iSgZhk6rg7cOW2PnNb?table=tblUONtouxmxvVFq&view=vewaTe1QWZ
 - 用餐记录：https://ycnw20znloxr.feishu.cn/wiki/QC07wNez9iSgZhk6rg7cOW2PnNb?table=tblBkttZl5XmmFFB&view=vew7J3ypSr
 - 统计信息接收人员：https://ycnw20znloxr.feishu.cn/wiki/QC07wNez9iSgZhk6rg7cOW2PnNb?table=tbl6brK6FcgCynAm&view=vewt6jEAWP
+- 餐费归档：https://ycnw20znloxr.feishu.cn/wiki/QC07wNez9iSgZhk6rg7cOW2PnNb?table=tblXtCxbcgcU57Ds&view=vew0jA1eGP
 
 ## 4.2 已确认字段结构（2026-02-12）
 ### 用餐人员配置（tblrulMIAx0vnkHu）
@@ -77,6 +86,12 @@
 ### 统计信息接收人员（tbl6brK6FcgCynAm）
 - `ID` `type=1005`
 - `人员` `type=11`
+
+### 餐费归档（tblXtCxbcgcU57Ds）
+- `用餐者` `type=11`
+- `开始日期` `type=5`
+- `结束日期` `type=5`
+- `费用` `type=1/2`
 
 ## 5. 配置文件说明
 - `config.shared.toml`：可提交，保存全局时区、字段名映射、定时参数等共享配置。
@@ -196,7 +211,7 @@ eatbot
 - 真实环境联调手册：`docs/飞书真实环境联调手册.md`
 - 开发计划与后续任务：`DEV.md`
 
-## 10. 当前验证状态（2026-02-14）
+## 10. 当前验证状态（2026-02-27）
 - 核心命令可用：`uv run eatbot --help`、`uv run eatbot run --help`。
-- 自动化测试通过：`uv run pytest -q`，当前为 `48 passed`。
+- 自动化测试通过：`uv run pytest -q`，当前为 `58 passed`。
 - 已知 warning 主要来自 `lark_oapi` 上游依赖内部弃用项，不影响当前功能运行。

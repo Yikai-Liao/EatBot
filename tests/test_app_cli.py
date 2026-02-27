@@ -28,6 +28,7 @@ def build_runtime_config() -> RuntimeConfig:
                 "meal_schedule": "t2",
                 "meal_record": "t3",
                 "stats_receivers": "t4",
+                "meal_fee_archive": "t5",
             },
             "field_names": {
                 "user_config": {
@@ -53,6 +54,12 @@ def build_runtime_config() -> RuntimeConfig:
                 },
                 "stats_receivers": {
                     "user": "人员",
+                },
+                "meal_fee_archive": {
+                    "user": "用餐者",
+                    "start_date": "开始日期",
+                    "end_date": "结束日期",
+                    "fee": "费用",
                 },
             },
         }
@@ -108,6 +115,18 @@ def test_build_cron_job_specs_applies_stat_offset_with_seconds() -> None:
     assert by_job["daily_dinner_stats"].hour == 16
     assert by_job["daily_dinner_stats"].minute == 30
     assert by_job["daily_dinner_stats"].second == 30
+
+
+def test_build_cron_job_specs_include_fee_archive_job() -> None:
+    schedule = ScheduleConfig(fee_archive_time="21:05")
+
+    specs = build_cron_job_specs(schedule)
+    by_job = {item.job_id: item for item in specs}
+
+    assert "daily_fee_archive" in by_job
+    assert by_job["daily_fee_archive"].hour == 21
+    assert by_job["daily_fee_archive"].minute == 5
+    assert by_job["daily_fee_archive"].second == 0
 
 
 def test_send_cards_command_passes_date(runner: CliRunner) -> None:

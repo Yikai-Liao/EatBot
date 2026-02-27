@@ -26,6 +26,7 @@ def build_config() -> RuntimeConfig:
                 "meal_schedule": "t2",
                 "meal_record": "t3",
                 "stats_receivers": "t4",
+                "meal_fee_archive": "t5",
             },
             "field_names": {
                 "user_config": {
@@ -51,6 +52,12 @@ def build_config() -> RuntimeConfig:
                 },
                 "stats_receivers": {
                     "user": "人员",
+                },
+                "meal_fee_archive": {
+                    "user": "用餐者",
+                    "start_date": "开始日期",
+                    "end_date": "结束日期",
+                    "fee": "费用",
                 },
             },
         }
@@ -502,6 +509,69 @@ class TestBookingServiceMock:
             ]
         )
         assert self.im.send_text.call_count == 2
+
+    def test_preview_fee_archive_returns_skip_when_not_settlement_day(self) -> None:
+        should_run, detail = self.service.preview_fee_archive(target_date=date(2026, 2, 14))
+
+        assert should_run is False
+        assert "非归档日" in detail
+        assert "2026-02-15" in detail
+
+    def test_preview_fee_archive_fallbacks_to_last_day_when_month_day_not_exists(self) -> None:
+        config = build_config()
+        config.schedule.fee_archive_day_of_month = 31
+        service = BookingService(config=config, repository=self.repo, im=self.im)
+
+        should_run, detail = service.preview_fee_archive(target_date=date(2026, 2, 28))
+
+        assert should_run is True
+        assert "归档区间=2026-02-01~2026-02-28（闭区间）" in detail
+
+    def test_archive_meal_fees_updates_table_and_sends_notifications(self) -> None:
+        self.repo.list_meal_fee_summaries.return_value = [SimpleNamespace(open_id="ou_sender", total_fee=Decimal("45"))]
+        self.repo.list_stats_receiver_open_ids.return_value = ["ou_admin"]
+
+        summary = self.service.archive_meal_fees(target_date=date(2026, 2, 15))
+
+        assert summary is not None
+        assert summary.start_date == date(2026, 1, 16)
+        assert summary.end_date == date(2026, 2, 15)
+        assert summary.user_count == 2
+        assert summary.total_fee == Decimal("45")
+        self.repo.list_meal_fee_summaries.assert_called_once_with(
+            start_date=date(2026, 1, 16),
+            end_date=date(2026, 2, 15),
+        )
+        self.repo.upsert_meal_fee_archive_record.assert_has_calls(
+            [
+                call(
+                    open_id="ou_sender",
+                    start_date=date(2026, 1, 16),
+                    end_date=date(2026, 2, 15),
+                    fee=Decimal("45"),
+                ),
+                call(
+                    open_id="ou_test",
+                    start_date=date(2026, 1, 16),
+                    end_date=date(2026, 2, 15),
+                    fee=Decimal("0"),
+                ),
+            ]
+        )
+        self.im.send_text.assert_has_calls(
+            [
+                call("ou_sender", "餐费归档通知：2026-01-16~2026-02-15（闭区间），你的餐费合计 45 元。"),
+                call("ou_test", "餐费归档通知：2026-01-16~2026-02-15（闭区间），你的餐费合计 0 元。"),
+                call("ou_admin", "餐费归档表已更新：2026-01-16~2026-02-15（闭区间），总收款 45 元。"),
+            ]
+        )
+
+    def test_archive_meal_fees_skip_when_not_settlement_day(self) -> None:
+        result = self.service.archive_meal_fees(target_date=date(2026, 2, 14))
+
+        assert result is None
+        self.repo.list_meal_fee_summaries.assert_not_called()
+        self.repo.upsert_meal_fee_archive_record.assert_not_called()
 
     def test_send_card_to_user_today_when_user_missing(self) -> None:
         self.repo.list_user_profiles.return_value = []

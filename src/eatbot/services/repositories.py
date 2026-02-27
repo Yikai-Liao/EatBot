@@ -22,6 +22,12 @@ class MealRecordRow:
     reservation_status: bool
 
 
+@dataclass(slots=True, frozen=True)
+class MealFeeSummary:
+    open_id: str
+    total_fee: Decimal
+
+
 class BitableRepository:
     def __init__(
         self,
@@ -230,7 +236,7 @@ class BitableRepository:
                     int((mono_time.monotonic() - started_at) * 1000),
                 )
                 return None
-            payload = self._meal_update_payload(price=Decimal("0"), reservation_status=False)
+            payload = self._meal_update_payload(reservation_status=False)
             write_started = mono_time.monotonic()
             try:
                 self._bitable.update_record(
@@ -262,13 +268,7 @@ class BitableRepository:
         if not match and record_id:
             match = next((row for row in rows if row.record_id == record_id), None)
 
-        payload = self._meal_payload(
-            target_date=target_date,
-            open_id=open_id,
-            meal=meal,
-            price=Decimal("0"),
-            reservation_status=False,
-        )
+        payload = self._meal_update_payload(reservation_status=False)
         if match is None:
             if not record_id:
                 logger.debug(
@@ -327,6 +327,84 @@ class BitableRepository:
 
     def list_user_meal_rows(self, *, target_date: date, open_id: str) -> list[MealRecordRow]:
         return self._list_meal_rows(target_date=target_date, open_id=open_id)
+
+    def list_meal_fee_summaries(self, *, start_date: date, end_date: date) -> list[MealFeeSummary]:
+        if end_date < start_date:
+            return []
+
+        table_id = self._table_id("meal_record")
+        records = self._bitable.list_records(table_id)
+        fields = self._table_fields("meal_record")
+
+        rows_by_key: dict[tuple[date, str, Meal], tuple[bool, Decimal]] = {}
+        for record in records:
+            data = record.fields or {}
+            record_date = _to_date(data.get(fields["date"]), self._timezone)
+            if record_date is None or record_date < start_date or record_date > end_date:
+                continue
+
+            record_open_id = _extract_open_id(data.get(fields["user"]))
+            meal_type = _to_meal(data.get(fields["meal_type"]))
+            if not record_open_id or meal_type is None:
+                continue
+
+            reservation_status = _to_checkbox(data.get(fields["reservation_status"]), default=True)
+            price = _to_decimal(data.get(fields["price"]))
+            row_key = (record_date, record_open_id, meal_type)
+            if row_key in rows_by_key:
+                rows_by_key.pop(row_key)
+            rows_by_key[row_key] = (reservation_status, price)
+
+        totals_by_open_id: dict[str, Decimal] = {}
+        for row_key, (reservation_status, price) in rows_by_key.items():
+            if not reservation_status:
+                continue
+            open_id = row_key[1]
+            totals_by_open_id[open_id] = totals_by_open_id.get(open_id, Decimal("0")) + price
+
+        return [
+            MealFeeSummary(open_id=open_id, total_fee=total_fee)
+            for open_id, total_fee in sorted(totals_by_open_id.items(), key=lambda item: item[0])
+        ]
+
+    def upsert_meal_fee_archive_record(
+        self,
+        *,
+        open_id: str,
+        start_date: date,
+        end_date: date,
+        fee: Decimal,
+    ) -> str:
+        table_id = self._table_id("meal_fee_archive")
+        fields = self._table_fields("meal_fee_archive")
+
+        payload = {
+            fields["user"]: [{"id": open_id}],
+            fields["start_date"]: _to_date_millis(start_date, self._timezone),
+            fields["end_date"]: _to_date_millis(end_date, self._timezone),
+            fields["fee"]: self._meal_fee_archive_fee_field_value(fee),
+        }
+
+        matched_by_key: dict[tuple[str, date, date], str] = {}
+        for record in self._bitable.list_records(table_id):
+            data = record.fields or {}
+            row_open_id = _extract_open_id(data.get(fields["user"]))
+            row_start_date = _to_date(data.get(fields["start_date"]), self._timezone)
+            row_end_date = _to_date(data.get(fields["end_date"]), self._timezone)
+            if not row_open_id or row_start_date is None or row_end_date is None:
+                continue
+            row_key = (row_open_id, row_start_date, row_end_date)
+            if row_key in matched_by_key:
+                matched_by_key.pop(row_key)
+            matched_by_key[row_key] = record.record_id
+
+        target_record_id = matched_by_key.get((open_id, start_date, end_date))
+        if target_record_id:
+            self._bitable.update_record(table_id=table_id, record_id=target_record_id, fields=payload)
+            return target_record_id
+
+        created = self._bitable.create_record(table_id=table_id, fields=payload)
+        return created.record_id
 
     def _list_meal_rows(self, *, target_date: date, open_id: str | None) -> list[MealRecordRow]:
         table_id = self._table_id("meal_record")
@@ -403,6 +481,15 @@ class BitableRepository:
                 return int(normalized)
             return float(normalized)
         return _format_decimal(price)
+
+    def _meal_fee_archive_fee_field_value(self, fee: Decimal) -> int | float | str:
+        field_type = self._mappings["meal_fee_archive"].by_logical_key["fee"].field_type
+        if field_type == 2:
+            normalized = fee.normalize()
+            if normalized == normalized.to_integral():
+                return int(normalized)
+            return float(normalized)
+        return _format_decimal(fee)
 
     def _table_id(self, table_alias: str) -> str:
         return self._mappings[table_alias].table_id

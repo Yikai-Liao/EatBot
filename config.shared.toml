@@ -30,6 +30,12 @@ reservation_status = "预约状态"
 [field_names.stats_receivers]
 user = "人员"
 
+[field_names.meal_fee_archive]
+user = "用餐者"
+start_date = "开始日期"
+end_date = "结束日期"
+fee = "费用"
+
 [schedule]
 # 每日发卡时间（HH:MM）
 send_time = "00:00"
@@ -39,5 +45,9 @@ lunch_cutoff = "10:00"
 dinner_cutoff = "16:00"
 # 统计发送偏移（HH:MM:SS），表示在截止时间后多久发送统计
 send_stat_offset = "00:01:00"
+# 每月归档日（1-31；若当月不存在则自动回退到当月最后一天）
+fee_archive_day_of_month = 15
+# 餐费归档任务每日检查时间（HH:MM）
+fee_archive_time = "21:00"
 # 用餐定时配置缓存 TTL（分钟）
 schedule_cache_ttl_minutes = 30

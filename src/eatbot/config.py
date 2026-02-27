@@ -14,6 +14,7 @@ class TablesConfig(BaseModel):
     meal_schedule: str
     meal_record: str
     stats_receivers: str
+    meal_fee_archive: str
 
 
 class UserConfigFieldNames(BaseModel):
@@ -44,21 +45,31 @@ class StatsReceiversFieldNames(BaseModel):
     user: str
 
 
+class MealFeeArchiveFieldNames(BaseModel):
+    user: str
+    start_date: str
+    end_date: str
+    fee: str
+
+
 class FieldNamesConfig(BaseModel):
     user_config: UserConfigFieldNames
     meal_schedule: MealScheduleFieldNames
     meal_record: MealRecordFieldNames
     stats_receivers: StatsReceiversFieldNames
+    meal_fee_archive: MealFeeArchiveFieldNames
 
 
 class ScheduleConfig(BaseModel):
     send_time: str = "09:00"
     lunch_cutoff: str = "10:30"
     dinner_cutoff: str = "16:30"
+    fee_archive_time: str = "21:00"
+    fee_archive_day_of_month: int = 15
     send_stat_offset: str = "00:00:00"
     schedule_cache_ttl_minutes: int = 30
 
-    @field_validator("send_time", "lunch_cutoff", "dinner_cutoff")
+    @field_validator("send_time", "lunch_cutoff", "dinner_cutoff", "fee_archive_time")
     @classmethod
     def validate_hhmm(cls, value: str) -> str:
         _parse_hhmm(value)
@@ -77,6 +88,13 @@ class ScheduleConfig(BaseModel):
             raise ValueError("schedule_cache_ttl_minutes 必须大于 0")
         return value
 
+    @field_validator("fee_archive_day_of_month")
+    @classmethod
+    def validate_fee_archive_day_of_month(cls, value: int) -> int:
+        if value < 1 or value > 31:
+            raise ValueError("fee_archive_day_of_month 必须在 1 到 31 之间")
+        return value
+
     @property
     def send_time_obj(self) -> time:
         return _parse_hhmm(self.send_time)
@@ -88,6 +106,10 @@ class ScheduleConfig(BaseModel):
     @property
     def dinner_cutoff_obj(self) -> time:
         return _parse_hhmm(self.dinner_cutoff)
+
+    @property
+    def fee_archive_time_obj(self) -> time:
+        return _parse_hhmm(self.fee_archive_time)
 
     @property
     def send_stat_offset_obj(self) -> timedelta:
@@ -177,6 +199,7 @@ class RuntimeConfig(BaseModel):
         _validate_no_duplicate_fields(self.field_names.meal_schedule.model_dump(), "field_names.meal_schedule")
         _validate_no_duplicate_fields(self.field_names.meal_record.model_dump(), "field_names.meal_record")
         _validate_no_duplicate_fields(self.field_names.stats_receivers.model_dump(), "field_names.stats_receivers")
+        _validate_no_duplicate_fields(self.field_names.meal_fee_archive.model_dump(), "field_names.meal_fee_archive")
         return self
 
 

@@ -31,6 +31,7 @@ class CronAction(StrEnum):
     SEND_CARDS = "send_cards"
     LUNCH_STATS = "lunch_stats"
     DINNER_STATS = "dinner_stats"
+    FEE_ARCHIVE = "fee_archive"
 
 
 class StatsMealOption(StrEnum):
@@ -70,6 +71,7 @@ class CronActionPreview:
 def build_cron_job_specs(schedule: ScheduleConfig) -> list[CronJobSpec]:
     send_time = schedule.send_time_obj
     stat_offset = schedule.send_stat_offset_obj
+    fee_archive_time = schedule.fee_archive_time_obj
     lunch_time = _time_with_offset(schedule.lunch_cutoff_obj, stat_offset)
     dinner_time = _time_with_offset(schedule.dinner_cutoff_obj, stat_offset)
 
@@ -94,6 +96,13 @@ def build_cron_job_specs(schedule: ScheduleConfig) -> list[CronJobSpec]:
             hour=dinner_time.hour,
             minute=dinner_time.minute,
             second=dinner_time.second,
+        ),
+        CronJobSpec(
+            job_id="daily_fee_archive",
+            action=CronAction.FEE_ARCHIVE,
+            hour=fee_archive_time.hour,
+            minute=fee_archive_time.minute,
+            second=fee_archive_time.second,
         ),
     ]
 
@@ -216,7 +225,13 @@ class EatBotApplication:
         if action == CronAction.LUNCH_STATS:
             self._booking.send_stats(target_date, Meal.LUNCH)
             return
-        self._booking.send_stats(target_date, Meal.DINNER)
+        if action == CronAction.DINNER_STATS:
+            self._booking.send_stats(target_date, Meal.DINNER)
+            return
+        if action == CronAction.FEE_ARCHIVE:
+            self._booking.archive_meal_fees(target_date=target_date)
+            return
+        raise ValueError(f"不支持的 cron action: {action}")
 
     def build_cron_preview_snapshot(self, *, target_dates: set[date]) -> CronPreviewSnapshot:
         if self._booking is None:
@@ -249,11 +264,19 @@ class EatBotApplication:
                 will_execute=will_execute,
                 detail=f"date={target_date.isoformat()}({weekday}); {detail}",
             )
-        will_execute, detail = self._booking.preview_stats(meal=Meal.DINNER, snapshot=snapshot)
-        return CronActionPreview(
-            will_execute=will_execute,
-            detail=f"date={target_date.isoformat()}({weekday}); {detail}",
-        )
+        if action == CronAction.DINNER_STATS:
+            will_execute, detail = self._booking.preview_stats(meal=Meal.DINNER, snapshot=snapshot)
+            return CronActionPreview(
+                will_execute=will_execute,
+                detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+            )
+        if action == CronAction.FEE_ARCHIVE:
+            will_execute, detail = self._booking.preview_fee_archive(target_date=target_date)
+            return CronActionPreview(
+                will_execute=will_execute,
+                detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+            )
+        raise ValueError(f"不支持的 cron action: {action}")
 
     def _start_scheduler(self) -> None:
         if self._config is None or self._booking is None:
@@ -288,13 +311,19 @@ class EatBotApplication:
             self._config.schedule.send_stat_offset_obj,
         )
         logger.info(
-            "定时任务已启动: send={}, lunch_cutoff={}, dinner_cutoff={}, stat_offset={}, lunch_stats={}, dinner_stats={}",
+            (
+                "定时任务已启动: send={}, lunch_cutoff={}, dinner_cutoff={}, "
+                "stat_offset={}, lunch_stats={}, dinner_stats={}, "
+                "fee_archive_day={}, fee_archive_time={}"
+            ),
             self._config.schedule.send_time,
             self._config.schedule.lunch_cutoff,
             self._config.schedule.dinner_cutoff,
             self._config.schedule.send_stat_offset,
             stats_lunch_time.strftime("%H:%M:%S"),
             stats_dinner_time.strftime("%H:%M:%S"),
+            self._config.schedule.fee_archive_day_of_month,
+            self._config.schedule.fee_archive_time,
         )
 
     def _run_scheduled_action(self, action: CronAction) -> None:

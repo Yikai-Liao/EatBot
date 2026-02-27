@@ -23,6 +23,7 @@ def build_config() -> RuntimeConfig:
                 "meal_schedule": "tbl_schedule",
                 "meal_record": "tbl_record",
                 "stats_receivers": "tbl_stats",
+                "meal_fee_archive": "tbl_archive",
             },
             "field_names": {
                 "user_config": {
@@ -48,6 +49,12 @@ def build_config() -> RuntimeConfig:
                 },
                 "stats_receivers": {
                     "user": "人员",
+                },
+                "meal_fee_archive": {
+                    "user": "用餐者",
+                    "start_date": "开始日期",
+                    "end_date": "结束日期",
+                    "fee": "费用",
                 },
             },
         }
@@ -90,6 +97,12 @@ def test_resolve_success_when_price_types_are_same() -> None:
             "tbl_stats": [
                 SimpleNamespace(field_id="f16", field_name="人员", type=11),
             ],
+            "tbl_archive": [
+                SimpleNamespace(field_id="f17", field_name="用餐者", type=11),
+                SimpleNamespace(field_id="f18", field_name="开始日期", type=5),
+                SimpleNamespace(field_id="f19", field_name="结束日期", type=5),
+                SimpleNamespace(field_id="f20", field_name="费用", type=2),
+            ],
         }
     )
 
@@ -97,6 +110,7 @@ def test_resolve_success_when_price_types_are_same() -> None:
 
     assert "user_config" in result
     assert "meal_record" in result
+    assert "meal_fee_archive" in result
 
 
 def test_resolve_raise_when_price_types_mismatch() -> None:
@@ -126,6 +140,12 @@ def test_resolve_raise_when_price_types_mismatch() -> None:
             ],
             "tbl_stats": [
                 SimpleNamespace(field_id="f16", field_name="人员", type=11),
+            ],
+            "tbl_archive": [
+                SimpleNamespace(field_id="f17", field_name="用餐者", type=11),
+                SimpleNamespace(field_id="f18", field_name="开始日期", type=5),
+                SimpleNamespace(field_id="f19", field_name="结束日期", type=5),
+                SimpleNamespace(field_id="f20", field_name="费用", type=2),
             ],
         }
     )
