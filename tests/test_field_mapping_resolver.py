@@ -102,6 +102,8 @@ def test_resolve_success_when_price_types_are_same() -> None:
                 SimpleNamespace(field_id="f18", field_name="开始日期", type=5),
                 SimpleNamespace(field_id="f19", field_name="结束日期", type=5),
                 SimpleNamespace(field_id="f20", field_name="费用", type=2),
+                SimpleNamespace(field_id="f21", field_name="午餐数", type=2),
+                SimpleNamespace(field_id="f22", field_name="晚餐数", type=2),
             ],
         }
     )
@@ -146,6 +148,8 @@ def test_resolve_raise_when_price_types_mismatch() -> None:
                 SimpleNamespace(field_id="f18", field_name="开始日期", type=5),
                 SimpleNamespace(field_id="f19", field_name="结束日期", type=5),
                 SimpleNamespace(field_id="f20", field_name="费用", type=2),
+                SimpleNamespace(field_id="f21", field_name="午餐数", type=2),
+                SimpleNamespace(field_id="f22", field_name="晚餐数", type=2),
             ],
         }
     )

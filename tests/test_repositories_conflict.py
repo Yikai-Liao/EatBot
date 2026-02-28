@@ -57,6 +57,8 @@ def build_config() -> RuntimeConfig:
                     "start_date": "开始日期",
                     "end_date": "结束日期",
                     "fee": "费用",
+                    "lunch_count": "午餐数",
+                    "dinner_count": "晚餐数",
                 },
             },
         }
@@ -144,6 +146,8 @@ def _build_mappings() -> dict[str, TableFieldMapping]:
                 "start_date": "开始日期",
                 "end_date": "结束日期",
                 "fee": "费用",
+                "lunch_count": "午餐数",
+                "dinner_count": "晚餐数",
             },
         ),
     }
@@ -374,8 +378,8 @@ def test_list_meal_fee_summaries_use_closed_interval_and_later_record() -> None:
     )
 
     assert summaries == [
-        MealFeeSummary(open_id="ou_1", total_fee=Decimal("47")),
-        MealFeeSummary(open_id="ou_2", total_fee=Decimal("18")),
+        MealFeeSummary(open_id="ou_1", total_fee=Decimal("47"), lunch_count=2, dinner_count=0),
+        MealFeeSummary(open_id="ou_2", total_fee=Decimal("18"), lunch_count=1, dinner_count=0),
     ]
 
 
@@ -390,6 +394,8 @@ def test_upsert_meal_fee_archive_record_update_later_conflict_row() -> None:
                         "开始日期": "2026-01-16",
                         "结束日期": "2026-02-15",
                         "费用": "40",
+                        "午餐数": 1,
+                        "晚餐数": 1,
                     },
                 ),
                 SimpleNamespace(
@@ -399,6 +405,8 @@ def test_upsert_meal_fee_archive_record_update_later_conflict_row() -> None:
                         "开始日期": "2026-01-16",
                         "结束日期": "2026-02-15",
                         "费用": "41",
+                        "午餐数": 1,
+                        "晚餐数": 1,
                     },
                 ),
             ]
@@ -411,8 +419,13 @@ def test_upsert_meal_fee_archive_record_update_later_conflict_row() -> None:
         start_date=date(2026, 1, 16),
         end_date=date(2026, 2, 15),
         fee=Decimal("45"),
+        lunch_count=2,
+        dinner_count=3,
     )
 
     assert record_id == "a_new"
     assert bitable.updated_records[-1][0] == "tbl_archive"
     assert bitable.updated_records[-1][1] == "a_new"
+    assert bitable.updated_records[-1][2]["费用"] == "45"
+    assert bitable.updated_records[-1][2]["午餐数"] == "2"
+    assert bitable.updated_records[-1][2]["晚餐数"] == "3"

@@ -50,6 +50,8 @@ class MealFeeArchiveFieldNames(BaseModel):
     start_date: str
     end_date: str
     fee: str
+    lunch_count: str = "午餐数"
+    dinner_count: str = "晚餐数"
 
 
 class FieldNamesConfig(BaseModel):

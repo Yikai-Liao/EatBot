@@ -561,7 +561,14 @@ class TestBookingServiceMock:
         assert "归档区间=2026-02-01~2026-02-28（闭区间）" in detail
 
     def test_archive_meal_fees_updates_table_and_sends_notifications(self) -> None:
-        self.repo.list_meal_fee_summaries.return_value = [SimpleNamespace(open_id="ou_sender", total_fee=Decimal("45"))]
+        self.repo.list_meal_fee_summaries.return_value = [
+            SimpleNamespace(
+                open_id="ou_sender",
+                total_fee=Decimal("45"),
+                lunch_count=2,
+                dinner_count=1,
+            )
+        ]
         self.repo.list_stats_receiver_open_ids.return_value = ["ou_admin"]
 
         summary = self.service.archive_meal_fees(target_date=date(2026, 2, 15))
@@ -582,20 +589,24 @@ class TestBookingServiceMock:
                     start_date=date(2026, 1, 16),
                     end_date=date(2026, 2, 15),
                     fee=Decimal("45"),
+                    lunch_count=2,
+                    dinner_count=1,
                 ),
                 call(
                     open_id="ou_test",
                     start_date=date(2026, 1, 16),
                     end_date=date(2026, 2, 15),
                     fee=Decimal("0"),
+                    lunch_count=0,
+                    dinner_count=0,
                 ),
             ]
         )
         self.im.send_text.assert_has_calls(
             [
-                call("ou_sender", "餐费归档通知：2026-01-16~2026-02-15（闭区间），你的餐费合计 45 元。"),
-                call("ou_test", "餐费归档通知：2026-01-16~2026-02-15（闭区间），你的餐费合计 0 元。"),
-                call("ou_admin", "餐费归档表已更新：2026-01-16~2026-02-15（闭区间），总收款 45 元。"),
+                call("ou_sender", "餐费归档通知：2026-01-16~2026-02-15，你本月午餐 2 顿，晚餐 1 顿，共 3 顿，餐费合计 45 元。"),
+                call("ou_test", "餐费归档通知：2026-01-16~2026-02-15，你本月午餐 0 顿，晚餐 0 顿，共 0 顿，餐费合计 0 元。"),
+                call("ou_admin", "餐费归档表已更新：2026-01-16~2026-02-15，午餐 2 人次，晚餐 1 人次，总计 3 人次，总收款 45 元。"),
             ]
         )
 

@@ -26,6 +26,8 @@ class MealRecordRow:
 class MealFeeSummary:
     open_id: str
     total_fee: Decimal
+    lunch_count: int
+    dinner_count: int
 
 
 class BitableRepository:
@@ -356,15 +358,33 @@ class BitableRepository:
             rows_by_key[row_key] = (reservation_status, price)
 
         totals_by_open_id: dict[str, Decimal] = {}
+        lunch_counts_by_open_id: dict[str, int] = {}
+        dinner_counts_by_open_id: dict[str, int] = {}
         for row_key, (reservation_status, price) in rows_by_key.items():
             if not reservation_status:
                 continue
             open_id = row_key[1]
+            meal = row_key[2]
             totals_by_open_id[open_id] = totals_by_open_id.get(open_id, Decimal("0")) + price
+            if meal == Meal.LUNCH:
+                lunch_counts_by_open_id[open_id] = lunch_counts_by_open_id.get(open_id, 0) + 1
+            elif meal == Meal.DINNER:
+                dinner_counts_by_open_id[open_id] = dinner_counts_by_open_id.get(open_id, 0) + 1
+
+        open_ids = sorted(
+            set(totals_by_open_id.keys())
+            | set(lunch_counts_by_open_id.keys())
+            | set(dinner_counts_by_open_id.keys())
+        )
 
         return [
-            MealFeeSummary(open_id=open_id, total_fee=total_fee)
-            for open_id, total_fee in sorted(totals_by_open_id.items(), key=lambda item: item[0])
+            MealFeeSummary(
+                open_id=open_id,
+                total_fee=totals_by_open_id.get(open_id, Decimal("0")),
+                lunch_count=lunch_counts_by_open_id.get(open_id, 0),
+                dinner_count=dinner_counts_by_open_id.get(open_id, 0),
+            )
+            for open_id in open_ids
         ]
 
     def upsert_meal_fee_archive_record(
@@ -374,6 +394,8 @@ class BitableRepository:
         start_date: date,
         end_date: date,
         fee: Decimal,
+        lunch_count: int,
+        dinner_count: int,
     ) -> str:
         table_id = self._table_id("meal_fee_archive")
         fields = self._table_fields("meal_fee_archive")
@@ -383,6 +405,8 @@ class BitableRepository:
             fields["start_date"]: _to_date_millis(start_date, self._timezone),
             fields["end_date"]: _to_date_millis(end_date, self._timezone),
             fields["fee"]: self._meal_fee_archive_fee_field_value(fee),
+            fields["lunch_count"]: self._meal_fee_archive_count_field_value("lunch_count", lunch_count),
+            fields["dinner_count"]: self._meal_fee_archive_count_field_value("dinner_count", dinner_count),
         }
 
         matched_by_key: dict[tuple[str, date, date], str] = {}
@@ -490,6 +514,12 @@ class BitableRepository:
                 return int(normalized)
             return float(normalized)
         return _format_decimal(fee)
+
+    def _meal_fee_archive_count_field_value(self, logical_key: str, count: int) -> int | str:
+        field_type = self._mappings["meal_fee_archive"].by_logical_key[logical_key].field_type
+        if field_type == 2:
+            return int(count)
+        return str(int(count))
 
     def _table_id(self, table_alias: str) -> str:
         return self._mappings[table_alias].table_id

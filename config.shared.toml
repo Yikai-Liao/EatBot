@@ -35,6 +35,8 @@ user = "用餐者"
 start_date = "开始日期"
 end_date = "结束日期"
 fee = "费用"
+lunch_count = "午餐数"
+dinner_count = "晚餐数"
 
 [schedule]
 # 每日发卡时间（HH:MM）

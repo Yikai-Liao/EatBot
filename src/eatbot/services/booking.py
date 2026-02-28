@@ -205,27 +205,38 @@ class BookingService:
             return None
 
         summaries = self._repository.list_meal_fee_summaries(start_date=window.start_date, end_date=window.end_date)
-        amount_by_open_id = {item.open_id: item.total_fee for item in summaries}
+        summary_by_open_id = {item.open_id: item for item in summaries}
         users = self._repository.list_user_profiles()
         enabled_open_ids = {user.open_id for user in users if user.enabled}
-        target_open_ids = sorted(set(amount_by_open_id.keys()) | enabled_open_ids)
+        target_open_ids = sorted(set(summary_by_open_id.keys()) | enabled_open_ids)
 
         total_fee = Decimal("0")
+        total_lunch_count = 0
+        total_dinner_count = 0
         for open_id in target_open_ids:
-            fee = amount_by_open_id.get(open_id, Decimal("0"))
+            summary = summary_by_open_id.get(open_id)
+            fee = summary.total_fee if summary else Decimal("0")
+            lunch_count = summary.lunch_count if summary else 0
+            dinner_count = summary.dinner_count if summary else 0
+            meal_count = lunch_count + dinner_count
             total_fee += fee
+            total_lunch_count += lunch_count
+            total_dinner_count += dinner_count
             self._repository.upsert_meal_fee_archive_record(
                 open_id=open_id,
                 start_date=window.start_date,
                 end_date=window.end_date,
                 fee=fee,
+                lunch_count=lunch_count,
+                dinner_count=dinner_count,
             )
             try:
                 self._im.send_text(
                     open_id,
                     (
-                        f"餐费归档通知：{window.start_date.isoformat()}~{window.end_date.isoformat()}（闭区间），"
-                        f"你的餐费合计 {_format_decimal(fee)} 元。"
+                        f"餐费归档通知：{window.start_date.isoformat()}~{window.end_date.isoformat()}，"
+                        f"你本月午餐 {lunch_count} 顿，晚餐 {dinner_count} 顿，共 {meal_count} 顿，"
+                        f"餐费合计 {_format_decimal(fee)} 元。"
                     ),
                 )
             except Exception:
@@ -233,10 +244,12 @@ class BookingService:
 
         receivers = self._repository.list_stats_receiver_open_ids()
         if receivers:
+            total_meal_count = total_lunch_count + total_dinner_count
             admin_text = (
                 f"餐费归档表已更新：{window.start_date.isoformat()}~"
-                f"{window.end_date.isoformat()}（闭区间），"
-                f"总收款 {_format_decimal(total_fee)} 元。"
+                f"{window.end_date.isoformat()}，"
+                f"午餐 {total_lunch_count} 人次，晚餐 {total_dinner_count} 人次，"
+                f"总计 {total_meal_count} 人次，总收款 {_format_decimal(total_fee)} 元。"
             )
             for open_id in receivers:
                 try:
