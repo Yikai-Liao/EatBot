@@ -10,6 +10,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from lark_oapi.api.application.v6 import P2ApplicationBotMenuV6
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 from lark_oapi.card.model import Card
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -52,6 +53,8 @@ class MealFeeArchiveSummary:
 
 class BookingService:
     _ALL_MEALS = {Meal.LUNCH, Meal.DINNER}
+    _TODAY_CARD_TEXT_COMMANDS = frozenset({"订餐", "/eatbot today", "当日卡片"})
+    _TODAY_CARD_MENU_EVENT_KEYS = frozenset({"当日卡片"})
 
     def __init__(
         self,
@@ -271,8 +274,21 @@ class BookingService:
             return
 
         text = _extract_text_from_message_content(message.content)
-        if text in {"订餐", "/eatbot today"}:
+        if text in self._TODAY_CARD_TEXT_COMMANDS:
             self.send_card_to_user_today(sender_open_id)
+
+    def handle_bot_menu_event(self, data: P2ApplicationBotMenuV6) -> None:
+        event = data.event if data else None
+        operator = event.operator if event else None
+        operator_id = operator.operator_id if operator else None
+        operator_open_id = operator_id.open_id if operator_id else None
+        event_key = str(event.event_key).strip() if event and event.event_key is not None else ""
+
+        if not operator_open_id:
+            return
+        if event_key not in self._TODAY_CARD_MENU_EVENT_KEYS:
+            return
+        self.send_card_to_user_today(operator_open_id)
 
     def handle_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         started_at = mono_time.monotonic()

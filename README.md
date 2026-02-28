@@ -114,6 +114,7 @@ max_size_mb = 20
 
 ### 6.2 需要添加的事件
 - `im.message.receive_v1`：接收用户给机器人发的文本消息（如 `订餐`）。
+- `application.bot.menu_v6`：接收聊天栏功能按钮点击（如 `当日卡片`）。
 
 ### 6.3 需要添加的回调
 - `card.action.trigger`：接收卡片按钮点击并同步返回 `toast`/更新后的卡片。
@@ -127,7 +128,7 @@ max_size_mb = 20
 
 ## 7. 当前实现状态（2026-02-14）
 - 已实现完整主流程：工作日发卡、卡片交互回写、截止控制、午晚餐统计发送。
-- 已接入飞书长连接事件：`im.message.receive_v1`、`card.action.trigger`。
+- 已接入飞书长连接事件：`im.message.receive_v1`、`application.bot.menu_v6`、`card.action.trigger`。
 - CLI 已统一为 Typer 命令树：`run`、`check`、`send cards`、`send stats`、`dev listen`、`dev cron`。
 - 日志体系已统一为 Loguru：命令行输出与文件持久化同时启用，支持文件大小轮转。
 - 测试框架已统一为 Pytest，覆盖配置加载、CLI 参数、核心业务规则与卡片处理。
@@ -135,6 +136,7 @@ max_size_mb = 20
 ## 8. 技术实现
 - 事件接收：飞书长连接（WebSocket）模式。
 - `im.message.receive_v1`：使用 `asyncio` 协程调度异步处理，避免阻塞长连接主处理线程。
+- `application.bot.menu_v6`：使用 `asyncio` 协程调度异步处理，支持聊天栏“当日卡片”按钮主动发卡。
 - `card.action.trigger`：同步处理并在 3 秒内返回 `toast` / 更新后的卡片。
 - 消息发送：飞书 IM 新版卡片（JSON `schema=2.0`）。
 - 数据访问：Bitable OpenAPI（records / fields）。
@@ -207,11 +209,12 @@ eatbot
 - `--test-mode --test-now ...` -> `dev listen --at ...`
 
 ### 9.6 补充说明
-- 用户给机器人发 `订餐` 可触发给本人发今日预约卡片。
+- 用户给机器人发 `订餐` / `当日卡片` 可触发给本人发今日预约卡片。
+- 聊天栏功能按钮可配置 `当日卡片`（事件 `application.bot.menu_v6`，`event_key=当日卡片`）。
 - 真实环境联调手册：`docs/飞书真实环境联调手册.md`
 - 开发计划与后续任务：`DEV.md`
 
 ## 10. 当前验证状态（2026-02-27）
 - 核心命令可用：`uv run eatbot --help`、`uv run eatbot run --help`。
-- 自动化测试通过：`uv run pytest -q`，当前为 `58 passed`。
+- 自动化测试通过：`uv run pytest -q`，当前为 `61 passed`。
 - 已知 warning 主要来自 `lark_oapi` 上游依赖内部弃用项，不影响当前功能运行。

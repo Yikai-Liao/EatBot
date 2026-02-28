@@ -251,6 +251,39 @@ class TestBookingServiceMock:
             self.service.handle_message_event(data)
             mocked.assert_called_once_with("ou_sender")
 
+    def test_handle_message_event_triggers_today_card_with_today_card_text(self) -> None:
+        with patch.object(self.service, "send_card_to_user_today") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    message=SimpleNamespace(message_type="text", content='{"text":"当日卡片"}'),
+                    sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_message_event(data)
+            mocked.assert_called_once_with("ou_sender")
+
+    def test_handle_bot_menu_event_triggers_today_card(self) -> None:
+        with patch.object(self.service, "send_card_to_user_today") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    event_key="当日卡片",
+                    operator=SimpleNamespace(operator_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_bot_menu_event(data)
+            mocked.assert_called_once_with("ou_sender")
+
+    def test_handle_bot_menu_event_ignores_unknown_event_key(self) -> None:
+        with patch.object(self.service, "send_card_to_user_today") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    event_key="其他菜单",
+                    operator=SimpleNamespace(operator_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_bot_menu_event(data)
+            mocked.assert_not_called()
+
     def test_handle_card_action_updates_and_cancels_records(self) -> None:
         data = SimpleNamespace(
             event=SimpleNamespace(

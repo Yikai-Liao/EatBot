@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 import lark_oapi as lark
+from lark_oapi.api.application.v6 import P2ApplicationBotMenuV6
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTrigger,
@@ -178,6 +179,7 @@ class EatBotApplication:
 
         handler = (
             lark.EventDispatcherHandler.builder("", "")
+            .register_p2_application_bot_menu_v6(self._on_bot_menu)
             .register_p2_im_message_receive_v1(self._on_message)
             .register_p2_card_action_trigger(self._on_card_action)
             .build()
@@ -347,6 +349,21 @@ class EatBotApplication:
         task = loop.create_task(self._handle_message_event_async(data))
         task.add_done_callback(self._on_message_done)
 
+    def _on_bot_menu(self, data: P2ApplicationBotMenuV6) -> None:
+        if self._booking is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                self._booking.handle_bot_menu_event(data)
+            except Exception:
+                logger.exception("处理机器人菜单事件失败")
+            return
+
+        task = loop.create_task(self._handle_bot_menu_event_async(data))
+        task.add_done_callback(self._on_bot_menu_done)
+
     def _on_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         if self._booking is None:
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "服务未初始化"}})
@@ -362,12 +379,24 @@ class EatBotApplication:
             return
         await asyncio.to_thread(self._booking.handle_message_event, data)
 
+    async def _handle_bot_menu_event_async(self, data: P2ApplicationBotMenuV6) -> None:
+        if self._booking is None:
+            return
+        await asyncio.to_thread(self._booking.handle_bot_menu_event, data)
+
     @staticmethod
     def _on_message_done(task: asyncio.Task) -> None:
         try:
             task.result()
         except Exception:
             logger.exception("异步处理消息事件失败")
+
+    @staticmethod
+    def _on_bot_menu_done(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except Exception:
+            logger.exception("异步处理机器人菜单事件失败")
 
 
 def configure_logging(

@@ -38,11 +38,11 @@ fee = "费用"
 
 [schedule]
 # 每日发卡时间（HH:MM）
-send_time = "00:00"
+send_time = "10:00"
 # 午餐截止时间（HH:MM）
-lunch_cutoff = "10:00"
+lunch_cutoff = "10:20"
 # 晚餐截止时间（HH:MM）
-dinner_cutoff = "16:00"
+dinner_cutoff = "16:20"
 # 统计发送偏移（HH:MM:SS），表示在截止时间后多久发送统计
 send_stat_offset = "00:01:00"
 # 每月归档日（1-31；若当月不存在则自动回退到当月最后一天）
