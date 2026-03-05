@@ -330,6 +330,44 @@ class BitableRepository:
     def list_user_meal_rows(self, *, target_date: date, open_id: str) -> list[MealRecordRow]:
         return self._list_meal_rows(target_date=target_date, open_id=open_id)
 
+    def list_user_meal_rows_by_record_ids(
+        self,
+        *,
+        target_date: date,
+        open_id: str,
+        record_ids: list[str],
+    ) -> list[MealRecordRow]:
+        table_id = self._table_id("meal_record")
+        records = self._bitable.batch_get_records(table_id, record_ids)
+        fields = self._table_fields("meal_record")
+
+        rows_by_key: dict[tuple[str | None, Meal | None], MealRecordRow] = {}
+        for record in records:
+            data = record.fields or {}
+            record_date = _to_date(data.get(fields["date"]), self._timezone)
+            if record_date != target_date:
+                continue
+
+            record_open_id = _extract_open_id(data.get(fields["user"]))
+            if record_open_id != open_id:
+                continue
+
+            meal_type = _to_meal(data.get(fields["meal_type"]))
+            reservation_status = _to_checkbox(data.get(fields["reservation_status"]), default=True)
+            row = MealRecordRow(
+                record_id=record.record_id,
+                target_date=record_date,
+                open_id=record_open_id,
+                meal_type=meal_type,
+                reservation_status=reservation_status,
+            )
+            key = (record_open_id, meal_type)
+            if key in rows_by_key:
+                rows_by_key.pop(key)
+            rows_by_key[key] = row
+
+        return list(rows_by_key.values())
+
     def list_meal_fee_summaries(self, *, start_date: date, end_date: date) -> list[MealFeeSummary]:
         if end_date < start_date:
             return []

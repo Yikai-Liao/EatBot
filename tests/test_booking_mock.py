@@ -10,6 +10,7 @@ from unittest.mock import Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from eatbot.adapters.feishu_clients import FeishuApiError
 from eatbot.config import RuntimeConfig
 from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
 from eatbot.services.booking import BookingService
@@ -505,6 +506,291 @@ class TestBookingServiceMock:
         assert status_by_meal["午餐"] == "default"
         assert status_by_meal["晚餐"] == "primary"
 
+    def test_handle_card_action_with_token_returns_optimistic_card_and_runs_in_background(self) -> None:
+        tasks: list = []
+        self.repo.list_user_meal_rows.return_value = [
+            make_meal_row(Meal.LUNCH, reservation_status=True, record_id="rec_lunch"),
+            make_meal_row(Meal.DINNER, reservation_status=True, record_id="rec_dinner"),
+        ]
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_1",
+                context=SimpleNamespace(open_message_id="om_1"),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["午餐"],
+                        toggle_meal="晚餐",
+                        meal_record_ids={"午餐": "rec_lunch", "晚餐": None},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+
+        assert response.toast.type == "info"
+        assert response.toast.content == "处理中"
+        assert response.card.type == "raw"
+        optimistic_payload = response.card.data
+        optimistic_refresh_button = next(
+            item
+            for item in optimistic_payload["body"]["elements"]
+            if item.get("tag") == "button" and item["text"]["content"] == "后台处理中"
+        )
+        assert optimistic_refresh_button["type"] == "primary"
+        assert len(tasks) == 1
+        self.repo.upsert_meal_record.assert_not_called()
+
+        tasks[0]()
+
+        self.im.delay_update_card.assert_called_once()
+        kwargs = self.im.delay_update_card.call_args.kwargs
+        assert kwargs["token"] == "c_token_1"
+        assert kwargs["card_payload"] is not None
+        assert kwargs["toast_content"] == "处理完成"
+        self.im.patch_interactive.assert_not_called()
+
+    def test_handle_card_action_rejects_when_user_is_processing_in_background(self) -> None:
+        tasks: list = []
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_1",
+                context=SimpleNamespace(open_message_id="om_1"),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["午餐"],
+                        toggle_meal="晚餐",
+                        meal_record_ids={"午餐": "rec_lunch", "晚餐": None},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        first_response = service.handle_card_action(data)
+        second_response = service.handle_card_action(data)
+
+        assert first_response.toast.type == "info"
+        assert first_response.toast.content == "处理中"
+        assert second_response.toast.type == "info"
+        assert second_response.toast.content == "后台处理中，请稍后"
+        assert second_response.card is None
+        assert len(tasks) == 1
+
+    def test_handle_card_action_refresh_with_token_returns_syncing_card(self) -> None:
+        tasks: list = []
+        self.repo.list_user_meal_rows.return_value = [
+            make_meal_row(Meal.LUNCH, reservation_status=False, record_id="rec_lunch"),
+            make_meal_row(Meal.DINNER, reservation_status=True, record_id="rec_dinner"),
+        ]
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_1",
+                context=SimpleNamespace(open_message_id="om_1"),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="refresh_state",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["晚餐"],
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+        assert response.toast.type == "info"
+        assert response.toast.content == "处理中"
+        assert response.card.type == "raw"
+        optimistic_payload = response.card.data
+        optimistic_refresh_button = next(
+            item
+            for item in optimistic_payload["body"]["elements"]
+            if item.get("tag") == "button" and item["text"]["content"] == "后台处理中"
+        )
+        assert optimistic_refresh_button["type"] == "primary"
+        assert len(tasks) == 1
+
+        tasks[0]()
+
+        self.im.delay_update_card.assert_called_once()
+        kwargs = self.im.delay_update_card.call_args.kwargs
+        assert kwargs["token"] == "c_token_1"
+        assert kwargs["card_payload"] is not None
+        assert kwargs["toast_content"] == "处理完成"
+        self.im.patch_interactive.assert_not_called()
+
+    def test_handle_card_action_with_token_only_context_keeps_card_update_via_callback_token(self) -> None:
+        tasks: list = []
+        self.repo.list_user_meal_rows.return_value = [
+            make_meal_row(Meal.LUNCH, reservation_status=True, record_id="rec_lunch"),
+            make_meal_row(Meal.DINNER, reservation_status=False, record_id="rec_dinner"),
+        ]
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_2",
+                context=SimpleNamespace(open_message_id=None),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["午餐"],
+                        toggle_meal="晚餐",
+                        meal_record_ids={"午餐": "rec_lunch", "晚餐": "rec_dinner"},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+        assert response.toast.type == "info"
+        assert response.toast.content == "处理中"
+        assert response.card.type == "raw"
+        optimistic_payload = response.card.data
+        optimistic_refresh_button = next(
+            item
+            for item in optimistic_payload["body"]["elements"]
+            if item.get("tag") == "button" and item["text"]["content"] == "后台处理中"
+        )
+        assert optimistic_refresh_button["type"] == "primary"
+        assert len(tasks) == 1
+
+        tasks[0]()
+
+        self.im.delay_update_card.assert_called_once()
+        kwargs = self.im.delay_update_card.call_args.kwargs
+        assert kwargs["token"] == "c_token_2"
+        assert kwargs["card_payload"] is not None
+        assert kwargs["toast_content"] == "处理完成"
+        self.im.patch_interactive.assert_not_called()
+
+    def test_handle_card_action_token_update_code_10002_falls_back_to_open_message_id_patch(self) -> None:
+        tasks: list = []
+        self.repo.list_user_meal_rows.return_value = [
+            make_meal_row(Meal.LUNCH, reservation_status=True, record_id="rec_lunch"),
+            make_meal_row(Meal.DINNER, reservation_status=False, record_id="rec_dinner"),
+        ]
+        self.im.delay_update_card.side_effect = FeishuApiError(
+            "interactive.v1.card.update 调用失败, code=10002, msg=[UpdateMessageWithToken] msg: [params err]"
+        )
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_3",
+                context=SimpleNamespace(open_message_id="om_3"),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["午餐"],
+                        toggle_meal="晚餐",
+                        meal_record_ids={"午餐": "rec_lunch", "晚餐": "rec_dinner"},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+        assert response.toast.type == "info"
+        assert response.toast.content == "处理中"
+        assert len(tasks) == 1
+
+        tasks[0]()
+
+        self.im.delay_update_card.assert_called_once()
+        delay_kwargs = self.im.delay_update_card.call_args.kwargs
+        assert delay_kwargs["token"] == "c_token_3"
+        assert delay_kwargs["toast_content"] == "处理完成"
+        self.im.patch_interactive.assert_called_once()
+        patch_kwargs = self.im.patch_interactive.call_args.kwargs
+        assert patch_kwargs["message_id"] == "om_3"
+
+    def test_handle_card_action_with_token_blocks_after_cutoff_before_background(self) -> None:
+        tasks: list = []
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            now_provider=lambda: datetime(2099, 1, 1, 21, 0),
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_1",
+                context=SimpleNamespace(open_message_id="om_1"),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["午餐"],
+                        toggle_meal="午餐",
+                        meal_record_ids={"午餐": "rec_lunch", "晚餐": None},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+
+        assert response.toast.type == "error"
+        assert "已过截止时间" in response.toast.content
+        assert len(tasks) == 0
+
     def test_handle_card_action_rejects_operator_mismatch(self) -> None:
         data = SimpleNamespace(
             event=SimpleNamespace(
@@ -685,18 +971,8 @@ class TestBookingServiceMock:
         assert response.toast.type == "info"
         assert response.toast.content == "预约已更新"
 
-    def test_schedule_rule_cache_ttl_and_force_refresh(self) -> None:
-        current_now = datetime(2099, 1, 1, 9, 0)
-
-        def now_provider() -> datetime:
-            return current_now
-
-        service = BookingService(
-            config=build_config(),
-            repository=self.repo,
-            im=self.im,
-            now_provider=now_provider,
-        )
+    def test_schedule_rules_are_always_fetched_from_repository(self) -> None:
+        service = BookingService(config=build_config(), repository=self.repo, im=self.im)
         self.repo.list_schedule_rules.side_effect = [
             [],
             [
@@ -707,18 +983,18 @@ class TestBookingServiceMock:
                 )
             ],
             [],
+            [],
         ]
 
         first = service._list_schedule_rules()
         second = service._list_schedule_rules()
         assert first == []
-        assert second == []
-        assert self.repo.list_schedule_rules.call_count == 1
-
-        current_now = datetime(2099, 1, 1, 9, 31)
-        third = service._list_schedule_rules()
-        assert len(third) == 1
+        assert len(second) == 1
         assert self.repo.list_schedule_rules.call_count == 2
 
-        service._list_schedule_rules(force_refresh=True)
+        third = service._list_schedule_rules()
+        assert third == []
         assert self.repo.list_schedule_rules.call_count == 3
+
+        service._list_schedule_rules(force_refresh=True)
+        assert self.repo.list_schedule_rules.call_count == 4

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from calendar import monthrange
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
+import threading
 import time as mono_time
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -23,7 +25,7 @@ from eatbot.domain.cards import ReservationCardBuilder
 from eatbot.domain.decision import MealPlanDecider, parse_meals
 from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
 from eatbot.services.repositories import BitableRepository
-from eatbot.adapters.feishu_clients import IMAdapter
+from eatbot.adapters.feishu_clients import FeishuApiError, IMAdapter
 
 
 @dataclass(slots=True, frozen=True)
@@ -51,6 +53,12 @@ class MealFeeArchiveSummary:
     total_fee: Decimal
 
 
+@dataclass(slots=True, frozen=True)
+class CardCallbackUpdateContext:
+    token: str | None
+    open_message_id: str | None
+
+
 class BookingService:
     _ALL_MEALS = {Meal.LUNCH, Meal.DINNER}
     _TODAY_CARD_TEXT_COMMANDS = frozenset({"订餐", "/eatbot today", "当日卡片"})
@@ -63,6 +71,7 @@ class BookingService:
         repository: BitableRepository,
         im: IMAdapter,
         now_provider: Callable[[], datetime] | None = None,
+        background_runner: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
         self._config = config
         self._repository = repository
@@ -71,8 +80,10 @@ class BookingService:
         self._decider = MealPlanDecider()
         self._timezone = ZoneInfo(config.timezone)
         self._now_provider = now_provider
-        self._schedule_rules_cache: list[MealScheduleRule] | None = None
-        self._schedule_rules_cache_expires_at: datetime | None = None
+        self._card_action_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eatbot-card-action")
+        self._background_runner = background_runner or self._default_background_runner
+        self._processing_users: set[str] = set()
+        self._processing_users_lock = threading.Lock()
 
     def send_daily_cards(self, target_date: date | None = None) -> None:
         target = target_date or self._now().date()
@@ -310,11 +321,16 @@ class BookingService:
             if not event or not event.action:
                 return self._toast("error", "卡片参数缺失")
 
-            level, content, card_payload = self._process_action(
+            callback_context = self._extract_callback_update_context(
+                token=getattr(event, "token", None),
+                context=getattr(event, "context", None),
+            )
+            level, content, card_payload = self._process_action_entry(
                 operator_open_id=event.operator.open_id if event.operator else None,
                 action_value=event.action.value or {},
                 form_value=event.action.form_value or {},
                 source="event",
+                callback_context=callback_context,
             )
             return self._toast(level, content, card_payload)
         except ValueError as exc:
@@ -332,11 +348,16 @@ class BookingService:
             if action is None:
                 return self._toast_dict("error", "卡片参数缺失")
 
-            level, content, card_payload = self._process_action(
+            callback_context = self._extract_callback_update_context(
+                token=getattr(data, "token", None),
+                context=getattr(data, "context", None),
+            )
+            level, content, card_payload = self._process_action_entry(
                 operator_open_id=getattr(data, "open_id", None),
                 action_value=action.value or {},
                 form_value=action.form_value or {},
                 source="card",
+                callback_context=callback_context,
             )
             return self._toast_dict(level, content, card_payload)
         except ValueError as exc:
@@ -390,6 +411,340 @@ class BookingService:
         )
         self._im.send_interactive(receive_id=user.open_id, card_json=card_json)
 
+    def _process_action_entry(
+        self,
+        *,
+        operator_open_id: str | None,
+        action_value: dict[str, Any],
+        form_value: dict[str, Any],
+        source: str,
+        callback_context: CardCallbackUpdateContext | None,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        action_name = str(action_value.get("action") or "")
+        if callback_context is None or action_name not in {"toggle_meal", "refresh_state"}:
+            return self._process_action(
+                operator_open_id=operator_open_id,
+                action_value=action_value,
+                form_value=form_value,
+                source=source,
+            )
+        if not operator_open_id:
+            return ("error", "仅允许本人提交预约", None)
+
+        target_open_id = str(action_value.get("target_open_id") or "")
+        if operator_open_id != target_open_id:
+            return ("error", "仅允许本人提交预约", None)
+
+        target_date = _parse_iso_date(str(action_value.get("target_date") or ""))
+        if target_date is None:
+            return ("error", "日期参数无效", None)
+
+        if not self._mark_user_processing(operator_open_id):
+            return ("info", "后台处理中，请稍后", None)
+
+        submitted_to_background = False
+        try:
+            if action_name == "toggle_meal":
+                toggle = _parse_meal(action_value.get("toggle_meal"))
+                if toggle is None:
+                    return ("error", "不支持的餐次操作", None)
+                allowed_meals = parse_meals(action_value.get("allowed_meals"))
+                if toggle in allowed_meals and not self._is_editable(target_date=target_date, meal=toggle):
+                    return ("error", f"{toggle.value} 已过截止时间，如有特殊情况请联系管理员人工处理", None)
+
+            optimistic_card_payload = self._build_optimistic_card_payload(
+                target_date=target_date,
+                target_open_id=target_open_id,
+                action_value=action_value,
+                refresh_syncing=True,
+            )
+            if optimistic_card_payload is None:
+                return self._process_action(
+                    operator_open_id=operator_open_id,
+                    action_value=action_value,
+                    form_value=form_value,
+                    source=source,
+                )
+
+            self._background_runner(
+                lambda: self._run_action_in_background(
+                    operator_open_id=operator_open_id,
+                    target_date=target_date,
+                    action_value=action_value,
+                    form_value=form_value,
+                    source=source,
+                    callback_context=callback_context,
+                    optimistic_card_payload=optimistic_card_payload,
+                )
+            )
+            submitted_to_background = True
+            return ("info", "处理中", optimistic_card_payload)
+        finally:
+            if not submitted_to_background:
+                self._unmark_user_processing(operator_open_id)
+
+    def _run_action_in_background(
+        self,
+        *,
+        operator_open_id: str,
+        target_date: date,
+        action_value: dict[str, Any],
+        form_value: dict[str, Any],
+        source: str,
+        callback_context: CardCallbackUpdateContext,
+        optimistic_card_payload: dict[str, Any],
+    ) -> None:
+        action_name = str(action_value.get("action") or "")
+        try:
+            try:
+                latest_payload = self._process_action_by_record_ids(
+                    operator_open_id=operator_open_id,
+                    target_date=target_date,
+                    action_value=action_value,
+                )
+            except Exception:
+                logger.exception(
+                    "后台处理卡片回调失败: operator={} action={}",
+                    operator_open_id,
+                    action_name,
+                )
+                latest_payload = None
+
+            fallback_payload = self._build_optimistic_card_payload(
+                target_date=target_date,
+                target_open_id=operator_open_id,
+                action_value=action_value,
+                refresh_syncing=False,
+            )
+            final_payload = latest_payload or fallback_payload or optimistic_card_payload
+            self._push_async_card_update(
+                callback_context=callback_context,
+                card_payload=final_payload,
+                operator_open_id=operator_open_id,
+                target_date=target_date,
+                toast_content="处理完成",
+            )
+        finally:
+            self._unmark_user_processing(operator_open_id)
+
+    def _process_action_by_record_ids(
+        self,
+        *,
+        operator_open_id: str,
+        target_date: date,
+        action_value: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        action_name = str(action_value.get("action") or "")
+        allowed = parse_meals(action_value.get("allowed_meals"))
+        if not allowed:
+            return None
+        defaults = parse_meals(action_value.get("default_meals")) & allowed
+        meal_prices = self._parse_meal_prices(action_value=action_value, allowed_meals=allowed)
+        selected_before = parse_meals(action_value.get("selected_meals")) & allowed
+        selected = set(selected_before)
+        meal_record_ids = self._parse_meal_record_ids(action_value=action_value, allowed_meals=allowed)
+
+        if action_name == "toggle_meal":
+            toggle = _parse_meal(action_value.get("toggle_meal"))
+            if toggle is not None and toggle in allowed:
+                if toggle in selected:
+                    selected.remove(toggle)
+                else:
+                    selected.add(toggle)
+            changed_meals = {meal for meal in allowed if (meal in selected_before) != (meal in selected)}
+            meal_record_ids = self._apply_selection(
+                target_date=target_date,
+                operator_open_id=operator_open_id,
+                changed_meals=changed_meals,
+                selected=selected,
+                meal_prices=meal_prices,
+                meal_record_ids=meal_record_ids,
+            )
+        elif action_name != "refresh_state":
+            return None
+
+        record_ids = [record_id for record_id in meal_record_ids.values() if record_id]
+        if record_ids:
+            rows = self._repository.list_user_meal_rows_by_record_ids(
+                target_date=target_date,
+                open_id=operator_open_id,
+                record_ids=record_ids,
+            )
+            if isinstance(rows, list) and rows:
+                selected, resolved_ids = self._resolve_selected_from_rows(rows=rows, allowed_meals=allowed)
+                meal_record_ids = {
+                    meal: resolved_ids.get(meal) or meal_record_ids.get(meal) for meal in allowed
+                }
+
+        return self._card_builder.build_payload(
+            target_date=target_date,
+            lunch_cutoff=self._config.schedule.lunch_cutoff,
+            dinner_cutoff=self._config.schedule.dinner_cutoff,
+            user_open_id=operator_open_id,
+            allowed_meals=allowed,
+            default_meals=defaults,
+            selected_meals=selected,
+            meal_prices=meal_prices,
+            meal_record_ids=meal_record_ids,
+        )
+
+    def _push_async_card_update(
+        self,
+        *,
+        callback_context: CardCallbackUpdateContext,
+        card_payload: dict[str, Any],
+        operator_open_id: str,
+        target_date: date,
+        toast_content: str | None = None,
+    ) -> None:
+        if callback_context.token:
+            try:
+                self._im.delay_update_card(
+                    token=callback_context.token,
+                    card_payload=card_payload,
+                    toast_content=toast_content,
+                )
+                logger.info(
+                    "异步卡片刷新成功: mode=callback_token operator={} date={}",
+                    operator_open_id,
+                    target_date.isoformat(),
+                )
+                return
+            except FeishuApiError as exc:
+                if "code=10002" in str(exc):
+                    logger.warning(
+                        "异步卡片刷新回退: mode=callback_token operator={} date={} reason=code_10002",
+                        operator_open_id,
+                        target_date.isoformat(),
+                    )
+                else:
+                    logger.exception(
+                        "异步卡片刷新失败: mode=callback_token operator={} date={}",
+                        operator_open_id,
+                        target_date.isoformat(),
+                    )
+            except Exception:
+                logger.exception(
+                    "异步卡片刷新失败: mode=callback_token operator={} date={}",
+                    operator_open_id,
+                    target_date.isoformat(),
+                )
+
+        if callback_context.open_message_id:
+            try:
+                self._im.patch_interactive(message_id=callback_context.open_message_id, card_payload=card_payload)
+                logger.info(
+                    "异步卡片刷新成功: mode=open_message_id operator={} date={}",
+                    operator_open_id,
+                    target_date.isoformat(),
+                )
+                return
+            except Exception:
+                logger.exception(
+                    "异步卡片刷新失败: mode=open_message_id operator={} date={}",
+                    operator_open_id,
+                    target_date.isoformat(),
+                )
+
+        logger.warning(
+            "异步卡片刷新跳过: operator={} date={} reason=no_available_context",
+            operator_open_id,
+            target_date.isoformat(),
+        )
+
+    def _build_optimistic_card_payload(
+        self,
+        *,
+        target_date: date,
+        target_open_id: str,
+        action_value: dict[str, Any],
+        refresh_syncing: bool = False,
+    ) -> dict[str, Any] | None:
+        action_name = str(action_value.get("action") or "")
+        if action_name not in {"toggle_meal", "refresh_state"}:
+            return None
+
+        allowed = parse_meals(action_value.get("allowed_meals"))
+        if not allowed:
+            return None
+        defaults = parse_meals(action_value.get("default_meals")) & allowed
+        selected = parse_meals(action_value.get("selected_meals")) & allowed
+        if action_name == "toggle_meal":
+            toggle_meal = _parse_meal(action_value.get("toggle_meal"))
+            if toggle_meal and toggle_meal in allowed:
+                if toggle_meal in selected:
+                    selected.remove(toggle_meal)
+                else:
+                    selected.add(toggle_meal)
+
+        meal_prices = self._parse_meal_prices(action_value=action_value, allowed_meals=allowed)
+        meal_record_ids = self._parse_meal_record_ids(action_value=action_value, allowed_meals=allowed)
+        return self._card_builder.build_payload(
+            target_date=target_date,
+            lunch_cutoff=self._config.schedule.lunch_cutoff,
+            dinner_cutoff=self._config.schedule.dinner_cutoff,
+            user_open_id=target_open_id,
+            allowed_meals=allowed,
+            default_meals=defaults,
+            selected_meals=selected,
+            meal_prices=meal_prices,
+            meal_record_ids=meal_record_ids,
+            refresh_syncing=refresh_syncing,
+        )
+
+    @staticmethod
+    def _parse_meal_prices(*, action_value: dict[str, Any], allowed_meals: set[Meal]) -> dict[Meal, Decimal]:
+        raw_prices = action_value.get("meal_prices")
+        if not isinstance(raw_prices, dict):
+            return {meal: Decimal("0") for meal in allowed_meals}
+        result: dict[Meal, Decimal] = {}
+        for meal in allowed_meals:
+            raw = raw_prices.get(meal.value)
+            try:
+                result[meal] = Decimal(str(raw))
+            except Exception:
+                result[meal] = Decimal("0")
+        return result
+
+    @staticmethod
+    def _parse_meal_record_ids(*, action_value: dict[str, Any], allowed_meals: set[Meal]) -> dict[Meal, str | None]:
+        raw_ids = action_value.get("meal_record_ids")
+        if not isinstance(raw_ids, dict):
+            return {meal: None for meal in allowed_meals}
+        result: dict[Meal, str | None] = {}
+        for meal in allowed_meals:
+            raw = raw_ids.get(meal.value)
+            if raw is None or raw == "":
+                result[meal] = None
+                continue
+            result[meal] = str(raw)
+        return result
+
+    def _default_background_runner(self, task: Callable[[], None]) -> None:
+        self._card_action_executor.submit(task)
+
+    def _mark_user_processing(self, open_id: str) -> bool:
+        with self._processing_users_lock:
+            if open_id in self._processing_users:
+                return False
+            self._processing_users.add(open_id)
+            return True
+
+    def _unmark_user_processing(self, open_id: str) -> None:
+        with self._processing_users_lock:
+            self._processing_users.discard(open_id)
+
+    @staticmethod
+    def _extract_callback_update_context(*, token: Any, context: Any) -> CardCallbackUpdateContext | None:
+        token_value = str(token or "").strip() or None
+        open_message_id_value = str(getattr(context, "open_message_id", "") or "").strip() or None
+        if token_value is None and open_message_id_value is None:
+            return None
+        return CardCallbackUpdateContext(
+            token=token_value,
+            open_message_id=open_message_id_value,
+        )
+
     def _process_action(
         self,
         *,
@@ -397,6 +752,7 @@ class BookingService:
         action_value: dict[str, Any],
         form_value: dict[str, Any],
         source: str,
+        enforce_cutoff: bool = True,
     ) -> tuple[str, str, dict[str, Any] | None]:
         action_name = str(action_value.get("action") or "")
         perf_total_started = mono_time.monotonic()
@@ -496,6 +852,13 @@ class BookingService:
 
             selected &= allowed
             changed_meals = {meal for meal in allowed if (meal in selected_before) != (meal in selected)}
+            if enforce_cutoff:
+                blocked_meal = next(
+                    (meal for meal in changed_meals if not self._is_editable(target_date=target_date, meal=meal)),
+                    None,
+                )
+                if blocked_meal is not None:
+                    return ("error", f"{blocked_meal.value} 已过截止时间，如有特殊情况请联系管理员人工处理", None)
             _mark("parse_and_validate")
 
             updated_record_ids = self._apply_selection(
@@ -545,11 +908,6 @@ class BookingService:
     ) -> dict[Meal, str | None]:
         started_at = mono_time.monotonic()
         updated_record_ids = dict(meal_record_ids)
-        cutoff_started = mono_time.monotonic()
-        for meal in changed_meals:
-            if not self._is_editable(target_date=target_date, meal=meal):
-                raise ValueError(f"{meal.value} 已过截止时间，如有特殊情况请联系管理员人工处理")
-        cutoff_cost = int((mono_time.monotonic() - cutoff_started) * 1000)
 
         write_started = mono_time.monotonic()
         upsert_count = 0
@@ -606,7 +964,7 @@ class BookingService:
             target_date.isoformat(),
             operator_open_id,
             len(changed_meals),
-            cutoff_cost,
+            0,
             write_cost,
             upsert_count,
             cancel_count,
@@ -643,24 +1001,13 @@ class BookingService:
         return selected, meal_record_ids
 
     def _list_schedule_rules(self, *, force_refresh: bool = False) -> list[MealScheduleRule]:
-        now = self._now()
-        cache_available = (
-            self._schedule_rules_cache is not None
-            and self._schedule_rules_cache_expires_at is not None
-            and now < self._schedule_rules_cache_expires_at
+        rules = self._repository.list_schedule_rules()
+        logger.debug(
+            "用餐定时配置已实时拉取: force={} rules={}",
+            force_refresh,
+            len(rules),
         )
-        if force_refresh or not cache_available:
-            rules = self._repository.list_schedule_rules()
-            self._schedule_rules_cache = rules
-            self._schedule_rules_cache_expires_at = now + self._config.schedule.schedule_cache_ttl_obj
-            logger.debug(
-                "用餐定时配置缓存已刷新: force={} rules={} ttl_minutes={} expires_at={}",
-                force_refresh,
-                len(rules),
-                self._config.schedule.schedule_cache_ttl_minutes,
-                self._schedule_rules_cache_expires_at.isoformat(),
-            )
-        return list(self._schedule_rules_cache or [])
+        return list(rules)
 
     def _allowed_meals_for_date(self, target_date: date) -> set[Meal]:
         rules = self._list_schedule_rules()
@@ -768,22 +1115,26 @@ class BookingService:
 
     @staticmethod
     def _toast(
-        level: str,
-        content: str,
+        level: str | None,
+        content: str | None,
         card_payload: dict[str, Any] | None = None,
     ) -> P2CardActionTriggerResponse:
-        result: dict[str, Any] = {"toast": {"type": level, "content": content}}
+        result: dict[str, Any] = {}
+        if level and content:
+            result["toast"] = {"type": level, "content": content}
         if card_payload is not None:
             result["card"] = {"type": "raw", "data": card_payload}
         return P2CardActionTriggerResponse(result)
 
     @staticmethod
     def _toast_dict(
-        level: str,
-        content: str,
+        level: str | None,
+        content: str | None,
         card_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        result: dict[str, Any] = {"toast": {"type": level, "content": content}}
+        result: dict[str, Any] = {}
+        if level and content:
+            result["toast"] = {"type": level, "content": content}
         if card_payload is not None:
             result["card"] = {"type": "raw", "data": card_payload}
         return result

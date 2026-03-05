@@ -50,3 +50,26 @@ def test_card_uses_two_toggle_buttons_with_callback() -> None:
         assert "meal_prices" in value
         assert "meal_record_ids" in value
     assert refresh_buttons[0]["behaviors"][0]["value"]["action"] == "refresh_state"
+
+
+def test_card_refresh_button_shows_syncing_state_when_requested() -> None:
+    builder = ReservationCardBuilder()
+    card_json = builder.build(
+        target_date=date(2026, 2, 13),
+        lunch_cutoff="10:30",
+        dinner_cutoff="16:30",
+        user_open_id="ou_test",
+        allowed_meals={Meal.LUNCH, Meal.DINNER},
+        default_meals={Meal.LUNCH},
+        selected_meals={Meal.LUNCH},
+        meal_prices={Meal.LUNCH: Decimal("20"), Meal.DINNER: Decimal("25")},
+        meal_record_ids={Meal.LUNCH: "rec_lunch", Meal.DINNER: None},
+        refresh_syncing=True,
+    )
+
+    card = json.loads(card_json)
+    buttons = [item for item in card["body"]["elements"] if item.get("tag") == "button"]
+    assert len(buttons) == 3
+    refresh_buttons = [button for button in buttons if button["text"]["content"] == "后台处理中"]
+    assert len(refresh_buttons) == 1
+    assert refresh_buttons[0]["type"] == "primary"

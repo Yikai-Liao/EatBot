@@ -23,6 +23,7 @@ class ReservationCardBuilder:
         selected_meals: set[Meal],
         meal_prices: dict[Meal, Decimal],
         meal_record_ids: dict[Meal, str | None],
+        refresh_syncing: bool = False,
     ) -> str:
         card = self.build_payload(
             target_date=target_date,
@@ -34,6 +35,7 @@ class ReservationCardBuilder:
             selected_meals=selected_meals,
             meal_prices=meal_prices,
             meal_record_ids=meal_record_ids,
+            refresh_syncing=refresh_syncing,
         )
         return json.dumps(card, ensure_ascii=False)
 
@@ -49,6 +51,7 @@ class ReservationCardBuilder:
         selected_meals: set[Meal],
         meal_prices: dict[Meal, Decimal],
         meal_record_ids: dict[Meal, str | None],
+        refresh_syncing: bool = False,
     ) -> dict[str, Any]:
         allowed_sorted = self._sorted_meals(allowed_meals)
         selected = selected_meals & allowed_meals
@@ -61,6 +64,7 @@ class ReservationCardBuilder:
             default_meals=self._sorted_meals(default_meals & allowed_meals),
             meal_prices=meal_prices,
             meal_record_ids=meal_record_ids,
+            refresh_syncing=refresh_syncing,
         )
 
         return {
@@ -102,6 +106,7 @@ def _build_toggle_buttons(
     default_meals: list[Meal],
     meal_prices: dict[Meal, Decimal],
     meal_record_ids: dict[Meal, str | None],
+    refresh_syncing: bool,
 ) -> list[dict[str, Any]]:
     selected_values = [meal.value for meal in selected_meals]
     allowed_values = [meal.value for meal in allowed_meals]
@@ -147,8 +152,8 @@ def _build_toggle_buttons(
     buttons.append(
         {
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "刷新"},
-            "type": "default",
+            "text": {"tag": "plain_text", "content": "后台处理中" if refresh_syncing else "刷新"},
+            "type": "primary" if refresh_syncing else "default",
             "behaviors": [{"type": "callback", "value": refresh_payload}],
         }
     )

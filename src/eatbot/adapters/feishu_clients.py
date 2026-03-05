@@ -9,12 +9,15 @@ import lark_oapi as lark
 from loguru import logger
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
+    BatchGetAppTableRecordRequest,
+    BatchGetAppTableRecordRequestBody,
     CreateAppTableRecordRequest,
     ListAppTableFieldRequest,
     ListAppTableRecordRequest,
     UpdateAppTableRecordRequest,
 )
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
 
 from eatbot.config import RuntimeConfig
 
@@ -145,6 +148,65 @@ class BitableAdapter:
         )
         return items
 
+    def batch_get_records(self, table_id: str, record_ids: list[str]) -> list[AppTableRecord]:
+        clean_ids: list[str] = []
+        for raw in record_ids:
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            if value in clean_ids:
+                continue
+            clean_ids.append(value)
+        if not clean_ids:
+            return []
+
+        started_at = mono_time.monotonic()
+        chunk_size = 100
+        records: list[AppTableRecord] = []
+        request_count = 0
+
+        for start in range(0, len(clean_ids), chunk_size):
+            chunk = clean_ids[start : start + chunk_size]
+            request = (
+                BatchGetAppTableRecordRequest.builder()
+                .app_token(self._app_token)
+                .table_id(table_id)
+                .request_body(
+                    BatchGetAppTableRecordRequestBody.builder()
+                    .record_ids(chunk)
+                    .user_id_type("open_id")
+                    .build()
+                )
+                .build()
+            )
+            request_started = mono_time.monotonic()
+            response = self._client.bitable.v1.app_table_record.batch_get(request)
+            request_cost = int((mono_time.monotonic() - request_started) * 1000)
+            self._ensure_success("bitable.v1.app_table_record.batch_get", response)
+            request_count += 1
+
+            body = response.data
+            chunk_records = len(body.records) if body and body.records else 0
+            logger.debug(
+                "Feishu API耗时: api=bitable.v1.app_table_record.batch_get table={} ids={} items={} cost={}ms",
+                table_id,
+                len(chunk),
+                chunk_records,
+                request_cost,
+            )
+            if body and body.records:
+                records.extend(body.records)
+
+        logger.debug(
+            "Feishu API汇总: api=bitable.v1.app_table_record.batch_get table={} requests={} ids={} items={} total={}ms",
+            table_id,
+            request_count,
+            len(clean_ids),
+            len(records),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
+        return records
+
     def create_record(self, table_id: str, fields: dict[str, Any]) -> AppTableRecord:
         request = (
             CreateAppTableRecordRequest.builder()
@@ -216,6 +278,45 @@ class IMAdapter:
             msg_type="interactive",
             content=card_json,
         )
+
+    def delay_update_card(
+        self,
+        *,
+        token: str,
+        card_payload: dict[str, Any] | None = None,
+        toast_content: str | None = None,
+    ) -> None:
+        body: dict[str, Any] = {"token": token}
+        if card_payload is not None:
+            body["card"] = card_payload
+        if toast_content:
+            body["toast"] = {"type": "info", "content": toast_content}
+
+        request = (
+            lark.BaseRequest.builder()
+            .http_method(lark.HttpMethod.POST)
+            .uri("/open-apis/interactive/v1/card/update")
+            .token_types({lark.AccessTokenType.TENANT})
+            .headers({"Content-Type": "application/json; charset=utf-8"})
+            .body(body)
+            .build()
+        )
+        response = self._client.request(request)
+        BitableAdapter._ensure_success("interactive.v1.card.update", response)
+
+    def patch_interactive(self, *, message_id: str, card_payload: dict[str, Any]) -> None:
+        request = (
+            PatchMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                PatchMessageRequestBody.builder()
+                .content(json.dumps(card_payload, ensure_ascii=False))
+                .build()
+            )
+            .build()
+        )
+        response = self._client.im.v1.message.patch(request)
+        BitableAdapter._ensure_success("im.v1.message.patch", response)
 
     def _send(self, *, receive_id: str, receive_id_type: str, msg_type: str, content: str) -> str:
         request = (
