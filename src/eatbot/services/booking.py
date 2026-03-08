@@ -61,8 +61,10 @@ class CardCallbackUpdateContext:
 
 class BookingService:
     _ALL_MEALS = {Meal.LUNCH, Meal.DINNER}
-    _TODAY_CARD_TEXT_COMMANDS = frozenset({"订餐", "/eatbot today", "当日卡片"})
+    _TODAY_CARD_TEXT_COMMANDS = frozenset({"订餐", "/eatbot today", "当日卡片", "卡片"})
+    _HELP_TEXT_COMMANDS = frozenset({"帮助"})
     _TODAY_CARD_MENU_EVENT_KEYS = frozenset({"当日卡片"})
+    _USER_NOT_FOUND_TEXT = "你不在后台用户列表中，请联系管理员。"
 
     def __init__(
         self,
@@ -104,7 +106,7 @@ class BookingService:
         today = self._now().date()
         user = self._load_user(open_id)
         if user is None:
-            self._im.send_text(open_id, "你不在用餐人员配置中，无法发起预约。")
+            self._im.send_text(open_id, self._USER_NOT_FOUND_TEXT)
             return
 
         rules = self._list_schedule_rules()
@@ -300,6 +302,12 @@ class BookingService:
         text = _extract_text_from_message_content(message.content)
         if text in self._TODAY_CARD_TEXT_COMMANDS:
             self.send_card_to_user_today(sender_open_id)
+            return
+        if text in self._HELP_TEXT_COMMANDS:
+            self._im.send_text(sender_open_id, self._config.help_doc)
+            return
+
+        self._im.send_text(sender_open_id, self._config.help_doc)
 
     def handle_bot_menu_event(self, data: P2ApplicationBotMenuV6) -> None:
         event = data.event if data else None
@@ -786,7 +794,7 @@ class BookingService:
 
             user = self._load_user(operator_open_id)
             if user is None:
-                return ("error", "你不在用餐人员配置中，无法发起预约。", None)
+                return ("error", self._USER_NOT_FOUND_TEXT, None)
 
             allowed = self._allowed_meals_for_date(target_date)
             defaults = user.meal_preferences & allowed
@@ -1063,7 +1071,7 @@ class BookingService:
 
     def _load_user(self, open_id: str) -> UserProfile | None:
         users = self._repository.list_user_profiles()
-        return next((user for user in users if user.open_id == open_id), None)
+        return next((user for user in users if user.open_id == open_id and user.enabled), None)
 
     def _is_editable(self, *, target_date: date, meal: Meal) -> bool:
         now = self._now()

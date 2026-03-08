@@ -22,6 +22,7 @@ def build_config() -> RuntimeConfig:
             "app_id": "id",
             "app_secret": "secret",
             "app_token": "app",
+            "help_doc": "帮助文档：发送“卡片”获取当日卡片，发送“帮助”查看说明。",
             "tables": {
                 "user_config": "t1",
                 "meal_schedule": "t2",
@@ -262,6 +263,43 @@ class TestBookingServiceMock:
             )
             self.service.handle_message_event(data)
             mocked.assert_called_once_with("ou_sender")
+
+    def test_handle_message_event_triggers_today_card_with_card_text(self) -> None:
+        with patch.object(self.service, "send_card_to_user_today") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    message=SimpleNamespace(message_type="text", content='{"text":"卡片"}'),
+                    sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_message_event(data)
+            mocked.assert_called_once_with("ou_sender")
+
+    def test_handle_message_event_help_command_sends_help_doc(self) -> None:
+        with patch.object(self.service, "send_card_to_user_today") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    message=SimpleNamespace(message_type="text", content='{"text":"帮助"}'),
+                    sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_message_event(data)
+
+            mocked.assert_not_called()
+            self.im.send_text.assert_called_once_with("ou_sender", self.service._config.help_doc)
+
+    def test_handle_message_event_unknown_text_sends_help_doc(self) -> None:
+        with patch.object(self.service, "send_card_to_user_today") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    message=SimpleNamespace(message_type="text", content='{"text":"随便说点什么"}'),
+                    sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_message_event(data)
+
+            mocked.assert_not_called()
+            self.im.send_text.assert_called_once_with("ou_sender", self.service._config.help_doc)
 
     def test_handle_bot_menu_event_triggers_today_card(self) -> None:
         with patch.object(self.service, "send_card_to_user_today") as mocked:
@@ -908,7 +946,15 @@ class TestBookingServiceMock:
 
         self.service.send_card_to_user_today("ou_missing")
 
-        self.im.send_text.assert_called_once_with("ou_missing", "你不在用餐人员配置中，无法发起预约。")
+        self.im.send_text.assert_called_once_with("ou_missing", "你不在后台用户列表中，请联系管理员。")
+
+    def test_send_card_to_user_today_when_user_disabled(self) -> None:
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender", enabled=False)]
+
+        self.service.send_card_to_user_today("ou_sender")
+
+        self.im.send_text.assert_called_once_with("ou_sender", "你不在后台用户列表中，请联系管理员。")
+        self.im.send_interactive.assert_not_called()
 
     def test_handle_card_action_rejects_when_after_cutoff_with_simulated_now(self) -> None:
         service = BookingService(

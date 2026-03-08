@@ -160,6 +160,7 @@ class RuntimeConfig(BaseModel):
     app_id: str
     app_secret: str
     app_token: str
+    help_doc: str = "发送“卡片”获取当日预约卡片，发送“帮助”查看帮助文档。"
     timezone: str = "Asia/Shanghai"
     wiki_token: str | None = None
     tables: TablesConfig
@@ -194,6 +195,14 @@ class RuntimeConfig(BaseModel):
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"timezone 无效: {value}") from exc
         return value
+
+    @field_validator("help_doc")
+    @classmethod
+    def validate_help_doc(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("help_doc 不能为空")
+        return normalized
 
     @model_validator(mode="after")
     def validate_unique_field_names(self) -> "RuntimeConfig":

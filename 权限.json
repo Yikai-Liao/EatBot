@@ -1,0 +1,27 @@
+{
+  "scopes": {
+    "tenant": [
+      "aily:message:read",
+      "aily:message:write",
+      "application:application.app_message_stats.overview:readonly",
+      "application:bot.menu:readonly",
+      "application:bot.menu:write",
+      "base:app:update",
+      "bitable:app",
+      "bitable:app:readonly",
+      "im:app_feed_card:write",
+      "im:message",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:recall",
+      "im:message:send_as_bot",
+      "im:message:send_multi_depts",
+      "im:message:send_multi_users",
+      "im:message:send_sys_msg",
+      "im:message:update",
+      "wiki:space:write_only",
+      "wiki:wiki"
+    ],
+    "user": []
+  }
+}

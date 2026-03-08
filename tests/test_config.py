@@ -17,6 +17,7 @@ def test_load_and_merge_shared_local() -> None:
         """
         app_token = "app"
         wiki_token = "wiki"
+        help_doc = "帮助文档示例"
 
         [tables]
         user_config = "t1"
@@ -73,6 +74,7 @@ def test_load_and_merge_shared_local() -> None:
         assert config.app_id == "id"
         assert config.app_secret == "secret"
         assert config.app_token == "app"
+        assert config.help_doc == "帮助文档示例"
         assert config.timezone == "Asia/Shanghai"
         assert config.logging.file_path == "logs/eatbot.log"
         assert config.logging.max_size_mb == 20

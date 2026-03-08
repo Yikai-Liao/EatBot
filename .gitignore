@@ -9,5 +9,5 @@ wheels/
 # Virtual environments
 .venv
 
-config.local.toml
+config.local.*toml
 logs/
