@@ -24,7 +24,7 @@ from eatbot.config import RuntimeConfig
 from eatbot.domain.cards import ReservationCardBuilder
 from eatbot.domain.decision import MealPlanDecider, parse_meals
 from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
-from eatbot.services.repositories import BitableRepository
+from eatbot.services.repositories import BitableRepository, MealFeeArchiveRecord
 from eatbot.adapters.feishu_clients import FeishuApiError, IMAdapter
 
 
@@ -65,6 +65,7 @@ class BookingService:
     _HELP_TEXT_COMMANDS = frozenset({"帮助"})
     _TODAY_CARD_MENU_EVENT_KEYS = frozenset({"当日卡片"})
     _USER_NOT_FOUND_TEXT = "你不在后台用户列表中，请联系管理员。"
+    _FEISHU_BOT_UNAVAILABLE_CODE = "230013"
 
     def __init__(
         self,
@@ -118,15 +119,31 @@ class BookingService:
         self._send_card_to_user(user=user, target_date=today, allowed_meals=plan.meals)
 
     def send_stats(self, target_date: date, meal: Meal) -> None:
+        started_at = mono_time.monotonic()
+        logger.info("统计发送开始: date={} meal={}", target_date.isoformat(), meal.value)
         count = self._repository.count_meal_records(target_date=target_date, meal=meal)
         receivers = self._repository.list_stats_receiver_open_ids()
         if not receivers:
-            logger.info("无统计接收人配置，跳过统计发送")
+            logger.info(
+                "无统计接收人配置，跳过统计发送: date={} meal={} count={} cost={}ms",
+                target_date.isoformat(),
+                meal.value,
+                count,
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
             return
 
         text = f"{target_date.isoformat()} {meal.value} 预约人数: {count}（{_weekday_text(target_date)}）"
         for open_id in receivers:
             self._im.send_text(open_id, text)
+        logger.info(
+            "统计发送完成: date={} meal={} count={} receivers={} cost={}ms",
+            target_date.isoformat(),
+            meal.value,
+            count,
+            len(receivers),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
 
     def build_cron_preview_snapshot(self, *, target_dates: set[date]) -> CronPreviewSnapshot:
         rules = self._list_schedule_rules()
@@ -207,6 +224,7 @@ class BookingService:
         )
 
     def archive_meal_fees(self, *, target_date: date | None = None) -> MealFeeArchiveSummary | None:
+        started_at = mono_time.monotonic()
         target = target_date or self._now().date()
         window = self._build_meal_fee_archive_window(target)
         if target != window.run_date:
@@ -217,15 +235,21 @@ class BookingService:
             )
             return None
 
+        logger.info(
+            "餐费归档开始: run_date={} start={} end={}",
+            window.run_date.isoformat(),
+            window.start_date.isoformat(),
+            window.end_date.isoformat(),
+        )
         summaries = self._repository.list_meal_fee_summaries(start_date=window.start_date, end_date=window.end_date)
         summary_by_open_id = {item.open_id: item for item in summaries}
-        users = self._repository.list_user_profiles()
-        enabled_open_ids = {user.open_id for user in users if user.enabled}
-        target_open_ids = sorted(set(summary_by_open_id.keys()) | enabled_open_ids)
+        target_open_ids = sorted(summary_by_open_id.keys())
 
         total_fee = Decimal("0")
         total_lunch_count = 0
         total_dinner_count = 0
+        archive_records: list[MealFeeArchiveRecord] = []
+        user_notice_messages: list[tuple[str, str]] = []
         for open_id in target_open_ids:
             summary = summary_by_open_id.get(open_id)
             fee = summary.total_fee if summary else Decimal("0")
@@ -235,16 +259,16 @@ class BookingService:
             total_fee += fee
             total_lunch_count += lunch_count
             total_dinner_count += dinner_count
-            self._repository.upsert_meal_fee_archive_record(
-                open_id=open_id,
-                start_date=window.start_date,
-                end_date=window.end_date,
-                fee=fee,
-                lunch_count=lunch_count,
-                dinner_count=dinner_count,
+            archive_records.append(
+                MealFeeArchiveRecord(
+                    open_id=open_id,
+                    fee=fee,
+                    lunch_count=lunch_count,
+                    dinner_count=dinner_count,
+                )
             )
-            try:
-                self._im.send_text(
+            user_notice_messages.append(
+                (
                     open_id,
                     (
                         f"餐费归档通知：{window.start_date.isoformat()}~{window.end_date.isoformat()}，"
@@ -252,9 +276,19 @@ class BookingService:
                         f"餐费合计 {_format_decimal(fee)} 元。"
                     ),
                 )
-            except Exception:
-                logger.exception("发送餐费归档通知失败: open_id={}", open_id)
+            )
+        self._repository.upsert_meal_fee_archive_records(
+            start_date=window.start_date,
+            end_date=window.end_date,
+            records=archive_records,
+        )
 
+        user_notice_sent = 0
+        user_notice_skipped = 0
+        user_notice_failed = 0
+        admin_notice_sent = 0
+        admin_notice_skipped = 0
+        admin_notice_failed = 0
         receivers = self._repository.list_stats_receiver_open_ids()
         if receivers:
             total_meal_count = total_lunch_count + total_dinner_count
@@ -265,20 +299,53 @@ class BookingService:
                 f"总计 {total_meal_count} 人次，总收款 {_format_decimal(total_fee)} 元。"
             )
             for open_id in receivers:
-                try:
-                    self._im.send_text(open_id, admin_text)
-                except Exception:
-                    logger.exception("发送餐费归档管理员通知失败: open_id={}", open_id)
+                result = self._send_archive_notice(
+                    open_id=open_id,
+                    text=admin_text,
+                    log_name="餐费归档管理员通知",
+                )
+                if result == "sent":
+                    admin_notice_sent += 1
+                elif result == "skipped":
+                    admin_notice_skipped += 1
+                else:
+                    admin_notice_failed += 1
         else:
             logger.info("无统计接收人配置，跳过餐费归档管理员通知")
 
+        for open_id, user_text in user_notice_messages:
+            result = self._send_archive_notice(
+                open_id=open_id,
+                text=user_text,
+                log_name="餐费归档通知",
+            )
+            if result == "sent":
+                user_notice_sent += 1
+            elif result == "skipped":
+                user_notice_skipped += 1
+            else:
+                user_notice_failed += 1
+
         logger.info(
-            "餐费归档完成: run_date={} start={} end={} users={} total_fee={}",
+            "餐费归档完成: run_date={} start={} end={} users={} total_fee={} cost={}ms",
             window.run_date.isoformat(),
             window.start_date.isoformat(),
             window.end_date.isoformat(),
             len(target_open_ids),
             _format_decimal(total_fee),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
+        logger.info(
+            (
+                "餐费归档通知结果: user_sent={} user_skipped={} user_failed={} "
+                "admin_sent={} admin_skipped={} admin_failed={}"
+            ),
+            user_notice_sent,
+            user_notice_skipped,
+            user_notice_failed,
+            admin_notice_sent,
+            admin_notice_skipped,
+            admin_notice_failed,
         )
         return MealFeeArchiveSummary(
             run_date=window.run_date,
@@ -1120,6 +1187,35 @@ class BookingService:
         if now.tzinfo is None:
             return now.replace(tzinfo=self._timezone)
         return now.astimezone(self._timezone)
+
+    @classmethod
+    def _is_bot_unavailable_error(cls, exc: FeishuApiError) -> bool:
+        return f"code={cls._FEISHU_BOT_UNAVAILABLE_CODE}" in str(exc)
+
+    def _send_archive_notice(self, *, open_id: str, text: str, log_name: str) -> str:
+        try:
+            self._im.send_text(open_id, text)
+            return "sent"
+        except FeishuApiError as exc:
+            if self._is_bot_unavailable_error(exc):
+                logger.warning(
+                    "发送{}跳过: open_id={} reason=bot_no_availability code={}",
+                    log_name,
+                    open_id,
+                    self._FEISHU_BOT_UNAVAILABLE_CODE,
+                )
+                return "skipped"
+            logger.warning("发送{}失败: open_id={} error={}", log_name, open_id, str(exc))
+            return "failed"
+        except Exception as exc:
+            logger.warning(
+                "发送{}失败: open_id={} error_type={} error={}",
+                log_name,
+                open_id,
+                exc.__class__.__name__,
+                str(exc),
+            )
+            return "failed"
 
     @staticmethod
     def _toast(

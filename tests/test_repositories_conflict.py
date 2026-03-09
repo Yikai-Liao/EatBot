@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from eatbot.adapters.feishu_clients import FieldMeta, TableFieldMapping
 from eatbot.config import RuntimeConfig
 from eatbot.domain.models import Meal
-from eatbot.services.repositories import BitableRepository, MealFeeSummary
+from eatbot.services.repositories import BitableRepository, MealFeeArchiveRecord, MealFeeSummary
 
 
 def build_config() -> RuntimeConfig:
@@ -71,7 +71,7 @@ class _FakeBitable:
         self.updated_records: list[tuple[str, str, dict]] = []
         self.created_records: list[tuple[str, dict]] = []
 
-    def list_records(self, table_id: str) -> list[SimpleNamespace]:
+    def list_records(self, table_id: str, *, filter_expr: str | None = None) -> list[SimpleNamespace]:
         return list(self._records_by_table.get(table_id, []))
 
     def update_record(self, table_id: str, record_id: str, fields: dict) -> SimpleNamespace:
@@ -84,6 +84,19 @@ class _FakeBitable:
         record = SimpleNamespace(record_id=record_id, fields=fields)
         self._records_by_table.setdefault(table_id, []).append(record)
         return record
+
+    def batch_update_records(self, table_id: str, records: list[SimpleNamespace]) -> list[SimpleNamespace]:
+        updated: list[SimpleNamespace] = []
+        for record in records:
+            result = self.update_record(table_id, record.record_id, record.fields)
+            updated.append(result)
+        return updated
+
+    def batch_create_records(self, table_id: str, records: list[SimpleNamespace]) -> list[SimpleNamespace]:
+        created: list[SimpleNamespace] = []
+        for record in records:
+            created.append(self.create_record(table_id, record.fields))
+        return created
 
 
 def _build_mappings() -> dict[str, TableFieldMapping]:
@@ -429,3 +442,51 @@ def test_upsert_meal_fee_archive_record_update_later_conflict_row() -> None:
     assert bitable.updated_records[-1][2]["费用"] == "45"
     assert bitable.updated_records[-1][2]["午餐数"] == "2"
     assert bitable.updated_records[-1][2]["晚餐数"] == "3"
+
+
+def test_upsert_meal_fee_archive_records_supports_batch_update_and_create() -> None:
+    bitable = _FakeBitable(
+        {
+            "tbl_archive": [
+                SimpleNamespace(
+                    record_id="a_old",
+                    fields={
+                        "用餐者": [{"id": "ou_1"}],
+                        "开始日期": "2026-01-16",
+                        "结束日期": "2026-02-15",
+                        "费用": "40",
+                        "午餐数": 1,
+                        "晚餐数": 1,
+                    },
+                ),
+                SimpleNamespace(
+                    record_id="a_new",
+                    fields={
+                        "用餐者": [{"id": "ou_1"}],
+                        "开始日期": "2026-01-16",
+                        "结束日期": "2026-02-15",
+                        "费用": "41",
+                        "午餐数": 1,
+                        "晚餐数": 1,
+                    },
+                ),
+            ]
+        }
+    )
+    repo = BitableRepository(config=build_config(), bitable=bitable, mappings=_build_mappings())
+
+    repo.upsert_meal_fee_archive_records(
+        start_date=date(2026, 1, 16),
+        end_date=date(2026, 2, 15),
+        records=[
+            MealFeeArchiveRecord(open_id="ou_1", fee=Decimal("45"), lunch_count=2, dinner_count=3),
+            MealFeeArchiveRecord(open_id="ou_2", fee=Decimal("18"), lunch_count=1, dinner_count=0),
+        ],
+    )
+
+    assert bitable.updated_records[-1][0] == "tbl_archive"
+    assert bitable.updated_records[-1][1] == "a_new"
+    assert bitable.updated_records[-1][2]["费用"] == "45"
+    assert bitable.created_records[-1][0] == "tbl_archive"
+    assert bitable.created_records[-1][1]["用餐者"] == [{"id": "ou_2"}]
+    assert bitable.created_records[-1][1]["费用"] == "18"

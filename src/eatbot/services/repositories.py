@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from lark_oapi.api.bitable.v1 import AppTableRecord
 from eatbot.adapters.feishu_clients import BitableAdapter, FeishuApiError, TableFieldMapping
 from eatbot.config import RuntimeConfig
 from eatbot.domain.decision import parse_meals
@@ -26,6 +27,14 @@ class MealRecordRow:
 class MealFeeSummary:
     open_id: str
     total_fee: Decimal
+    lunch_count: int
+    dinner_count: int
+
+
+@dataclass(slots=True, frozen=True)
+class MealFeeArchiveRecord:
+    open_id: str
+    fee: Decimal
     lunch_count: int
     dinner_count: int
 
@@ -324,7 +333,11 @@ class BitableRepository:
         return target_record_id
 
     def count_meal_records(self, *, target_date: date, meal: Meal) -> int:
-        rows = self._list_meal_rows(target_date=target_date, open_id=None)
+        rows = self._list_meal_rows(
+            target_date=target_date,
+            open_id=None,
+            filter_expr=self._meal_record_date_range_filter(start_date=target_date, end_date=target_date),
+        )
         return sum(1 for row in rows if row.meal_type == meal and row.reservation_status)
 
     def list_user_meal_rows(self, *, target_date: date, open_id: str) -> list[MealRecordRow]:
@@ -373,7 +386,10 @@ class BitableRepository:
             return []
 
         table_id = self._table_id("meal_record")
-        records = self._bitable.list_records(table_id)
+        records = self._bitable.list_records(
+            table_id,
+            filter_expr=self._meal_record_date_range_filter(start_date=start_date, end_date=end_date),
+        )
         fields = self._table_fields("meal_record")
 
         rows_by_key: dict[tuple[date, str, Meal], tuple[bool, Decimal]] = {}
@@ -447,20 +463,8 @@ class BitableRepository:
             fields["dinner_count"]: self._meal_fee_archive_count_field_value("dinner_count", dinner_count),
         }
 
-        matched_by_key: dict[tuple[str, date, date], str] = {}
-        for record in self._bitable.list_records(table_id):
-            data = record.fields or {}
-            row_open_id = _extract_open_id(data.get(fields["user"]))
-            row_start_date = _to_date(data.get(fields["start_date"]), self._timezone)
-            row_end_date = _to_date(data.get(fields["end_date"]), self._timezone)
-            if not row_open_id or row_start_date is None or row_end_date is None:
-                continue
-            row_key = (row_open_id, row_start_date, row_end_date)
-            if row_key in matched_by_key:
-                matched_by_key.pop(row_key)
-            matched_by_key[row_key] = record.record_id
-
-        target_record_id = matched_by_key.get((open_id, start_date, end_date))
+        matched_by_open_id = self._list_meal_fee_archive_record_ids(start_date=start_date, end_date=end_date)
+        target_record_id = matched_by_open_id.get(open_id)
         if target_record_id:
             self._bitable.update_record(table_id=table_id, record_id=target_record_id, fields=payload)
             return target_record_id
@@ -468,9 +472,98 @@ class BitableRepository:
         created = self._bitable.create_record(table_id=table_id, fields=payload)
         return created.record_id
 
-    def _list_meal_rows(self, *, target_date: date, open_id: str | None) -> list[MealRecordRow]:
+    def upsert_meal_fee_archive_records(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        records: list[MealFeeArchiveRecord],
+    ) -> None:
+        if not records:
+            return
+
+        table_id = self._table_id("meal_fee_archive")
+        fields = self._table_fields("meal_fee_archive")
+        matched_by_open_id = self._list_meal_fee_archive_record_ids(start_date=start_date, end_date=end_date)
+
+        update_payloads: list[AppTableRecord] = []
+        create_payloads: list[AppTableRecord] = []
+        for record in records:
+            payload = {
+                fields["user"]: [{"id": record.open_id}],
+                fields["start_date"]: _to_date_millis(start_date, self._timezone),
+                fields["end_date"]: _to_date_millis(end_date, self._timezone),
+                fields["fee"]: self._meal_fee_archive_fee_field_value(record.fee),
+                fields["lunch_count"]: self._meal_fee_archive_count_field_value("lunch_count", record.lunch_count),
+                fields["dinner_count"]: self._meal_fee_archive_count_field_value("dinner_count", record.dinner_count),
+            }
+            existing_record_id = matched_by_open_id.get(record.open_id)
+            if existing_record_id:
+                update_payloads.append(
+                    AppTableRecord.builder()
+                    .record_id(existing_record_id)
+                    .fields(payload)
+                    .build()
+                )
+            else:
+                create_payloads.append(AppTableRecord.builder().fields(payload).build())
+
+        self._bitable.batch_update_records(table_id=table_id, records=update_payloads)
+        self._bitable.batch_create_records(table_id=table_id, records=create_payloads)
+
+    def _list_meal_fee_archive_record_ids(self, *, start_date: date, end_date: date) -> dict[str, str]:
+        table_id = self._table_id("meal_fee_archive")
+        fields = self._table_fields("meal_fee_archive")
+        filter_expr = self._date_range_filter(
+            field_name=fields["start_date"],
+            start_date=start_date,
+            end_date=start_date,
+        )
+        filter_expr = (
+            f"{filter_expr} && "
+            f"{self._date_range_filter(field_name=fields['end_date'], start_date=end_date, end_date=end_date)}"
+        )
+
+        matched_by_open_id: dict[str, str] = {}
+        for record in self._bitable.list_records(table_id, filter_expr=filter_expr):
+            data = record.fields or {}
+            row_open_id = _extract_open_id(data.get(fields["user"]))
+            row_start_date = _to_date(data.get(fields["start_date"]), self._timezone)
+            row_end_date = _to_date(data.get(fields["end_date"]), self._timezone)
+            if not row_open_id or row_start_date is None or row_end_date is None:
+                continue
+            if row_start_date != start_date or row_end_date != end_date:
+                continue
+            if row_open_id in matched_by_open_id:
+                matched_by_open_id.pop(row_open_id)
+            matched_by_open_id[row_open_id] = record.record_id
+        return matched_by_open_id
+
+    def _meal_record_date_range_filter(self, *, start_date: date, end_date: date) -> str:
+        return self._date_range_filter(
+            field_name=self._table_fields("meal_record")["date"],
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    @staticmethod
+    def _date_range_filter(*, field_name: str, start_date: date, end_date: date) -> str:
+        start_text = start_date.isoformat()
+        end_text = end_date.isoformat()
+        return (
+            f'CurrentValue.[{field_name}] >= TODATE("{start_text}")'
+            f' && CurrentValue.[{field_name}] <= TODATE("{end_text}")'
+        )
+
+    def _list_meal_rows(
+        self,
+        *,
+        target_date: date,
+        open_id: str | None,
+        filter_expr: str | None = None,
+    ) -> list[MealRecordRow]:
         table_id = self._table_id("meal_record")
-        records = self._bitable.list_records(table_id)
+        records = self._bitable.list_records(table_id, filter_expr=filter_expr)
         fields = self._table_fields("meal_record")
 
         rows_by_key: dict[tuple[str | None, Meal | None], MealRecordRow] = {}

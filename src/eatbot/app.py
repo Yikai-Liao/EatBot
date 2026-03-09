@@ -636,6 +636,7 @@ def dev_cron_command(
         return
 
     for event in events:
+        logger.info("dev cron 任务开始: at={}, job={}", event.trigger_at.isoformat(), event.spec.job_id)
         app.execute_cron_action(event.spec.action, run_at=event.trigger_at)
         logger.info("dev cron 任务执行完成: at={}, job={}", event.trigger_at.isoformat(), event.spec.job_id)
 

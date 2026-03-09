@@ -900,46 +900,80 @@ class TestBookingServiceMock:
         assert summary is not None
         assert summary.start_date == date(2026, 1, 16)
         assert summary.end_date == date(2026, 2, 15)
-        assert summary.user_count == 2
+        assert summary.user_count == 1
         assert summary.total_fee == Decimal("45")
         self.repo.list_meal_fee_summaries.assert_called_once_with(
             start_date=date(2026, 1, 16),
             end_date=date(2026, 2, 15),
         )
-        self.repo.upsert_meal_fee_archive_record.assert_has_calls(
-            [
-                call(
-                    open_id="ou_sender",
-                    start_date=date(2026, 1, 16),
-                    end_date=date(2026, 2, 15),
-                    fee=Decimal("45"),
-                    lunch_count=2,
-                    dinner_count=1,
-                ),
-                call(
-                    open_id="ou_test",
-                    start_date=date(2026, 1, 16),
-                    end_date=date(2026, 2, 15),
-                    fee=Decimal("0"),
-                    lunch_count=0,
-                    dinner_count=0,
-                ),
-            ]
-        )
+        self.repo.upsert_meal_fee_archive_records.assert_called_once()
+        upsert_kwargs = self.repo.upsert_meal_fee_archive_records.call_args.kwargs
+        assert upsert_kwargs["start_date"] == date(2026, 1, 16)
+        assert upsert_kwargs["end_date"] == date(2026, 2, 15)
+        archive_records = upsert_kwargs["records"]
+        assert len(archive_records) == 1
+        assert archive_records[0].open_id == "ou_sender"
+        assert archive_records[0].fee == Decimal("45")
+        assert archive_records[0].lunch_count == 2
+        assert archive_records[0].dinner_count == 1
         self.im.send_text.assert_has_calls(
             [
                 call("ou_sender", "餐费归档通知：2026-01-16~2026-02-15，你本月午餐 2 顿，晚餐 1 顿，共 3 顿，餐费合计 45 元。"),
-                call("ou_test", "餐费归档通知：2026-01-16~2026-02-15，你本月午餐 0 顿，晚餐 0 顿，共 0 顿，餐费合计 0 元。"),
                 call("ou_admin", "餐费归档表已更新：2026-01-16~2026-02-15，午餐 2 人次，晚餐 1 人次，总计 3 人次，总收款 45 元。"),
-            ]
+            ],
+            any_order=True,
         )
+        assert self.im.send_text.call_count == 2
+
+    def test_archive_meal_fees_sends_admin_notice_before_user_notices(self) -> None:
+        self.repo.list_meal_fee_summaries.return_value = [
+            SimpleNamespace(
+                open_id="ou_sender",
+                total_fee=Decimal("45"),
+                lunch_count=2,
+                dinner_count=1,
+            )
+        ]
+        self.repo.list_stats_receiver_open_ids.return_value = ["ou_admin"]
+
+        self.service.archive_meal_fees(target_date=date(2026, 2, 15))
+
+        first_call = self.im.send_text.call_args_list[0]
+        assert first_call == call(
+            "ou_admin",
+            "餐费归档表已更新：2026-01-16~2026-02-15，午餐 2 人次，晚餐 1 人次，总计 3 人次，总收款 45 元。",
+        )
+
+    def test_archive_meal_fees_ignores_bot_unavailable_errors_for_user_notifications(self) -> None:
+        self.repo.list_meal_fee_summaries.return_value = [
+            SimpleNamespace(
+                open_id="ou_sender",
+                total_fee=Decimal("45"),
+                lunch_count=2,
+                dinner_count=1,
+            )
+        ]
+        self.repo.list_stats_receiver_open_ids.return_value = []
+        self.im.send_text.side_effect = [
+            FeishuApiError("im.v1.message.create 调用失败, code=230013, msg=Bot has NO availability to this user., log_id=test"),
+        ]
+
+        summary = self.service.archive_meal_fees(target_date=date(2026, 2, 15))
+
+        assert summary is not None
+        assert summary.user_count == 1
+        self.im.send_text.assert_called_once_with(
+            "ou_sender",
+            "餐费归档通知：2026-01-16~2026-02-15，你本月午餐 2 顿，晚餐 1 顿，共 3 顿，餐费合计 45 元。",
+        )
+        assert self.im.send_text.call_count == 1
 
     def test_archive_meal_fees_skip_when_not_settlement_day(self) -> None:
         result = self.service.archive_meal_fees(target_date=date(2026, 2, 14))
 
         assert result is None
         self.repo.list_meal_fee_summaries.assert_not_called()
-        self.repo.upsert_meal_fee_archive_record.assert_not_called()
+        self.repo.upsert_meal_fee_archive_records.assert_not_called()
 
     def test_send_card_to_user_today_when_user_missing(self) -> None:
         self.repo.list_user_profiles.return_value = []

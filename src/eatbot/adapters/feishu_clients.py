@@ -9,8 +9,12 @@ import lark_oapi as lark
 from loguru import logger
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
+    BatchCreateAppTableRecordRequest,
+    BatchCreateAppTableRecordRequestBody,
     BatchGetAppTableRecordRequest,
     BatchGetAppTableRecordRequestBody,
+    BatchUpdateAppTableRecordRequest,
+    BatchUpdateAppTableRecordRequestBody,
     CreateAppTableRecordRequest,
     ListAppTableFieldRequest,
     ListAppTableRecordRequest,
@@ -101,7 +105,7 @@ class BitableAdapter:
         )
         return items
 
-    def list_records(self, table_id: str) -> list[AppTableRecord]:
+    def list_records(self, table_id: str, *, filter_expr: str | None = None) -> list[AppTableRecord]:
         started_at = mono_time.monotonic()
         items: list[AppTableRecord] = []
         page_token: str | None = None
@@ -115,6 +119,8 @@ class BitableAdapter:
                 .page_size(500)
                 .user_id_type("open_id")
             )
+            if filter_expr:
+                builder = builder.filter(filter_expr)
             if page_token:
                 builder = builder.page_token(page_token)
 
@@ -127,10 +133,14 @@ class BitableAdapter:
             page_items = len(body.items) if body and body.items else 0
             page_count += 1
             logger.debug(
-                "Feishu API耗时: api=bitable.v1.app_table_record.list table={} page={} items={} cost={}ms",
+                (
+                    "Feishu API耗时: api=bitable.v1.app_table_record.list "
+                    "table={} page={} items={} filter={} cost={}ms"
+                ),
                 table_id,
                 page_count,
                 page_items,
+                "on" if filter_expr else "off",
                 request_cost,
             )
             if body and body.items:
@@ -140,10 +150,14 @@ class BitableAdapter:
             page_token = body.page_token
 
         logger.debug(
-            "Feishu API汇总: api=bitable.v1.app_table_record.list table={} pages={} items={} total={}ms",
+            (
+                "Feishu API汇总: api=bitable.v1.app_table_record.list "
+                "table={} pages={} items={} filter={} total={}ms"
+            ),
             table_id,
             page_count,
             len(items),
+            "on" if filter_expr else "off",
             int((mono_time.monotonic() - started_at) * 1000),
         )
         return items
@@ -252,6 +266,108 @@ class BitableAdapter:
             request_cost,
         )
         return response.data.record
+
+    def batch_create_records(self, table_id: str, records: list[AppTableRecord]) -> list[AppTableRecord]:
+        clean_records = [record for record in records if record and record.fields]
+        if not clean_records:
+            return []
+
+        started_at = mono_time.monotonic()
+        chunk_size = 500
+        created_records: list[AppTableRecord] = []
+        request_count = 0
+
+        for start in range(0, len(clean_records), chunk_size):
+            chunk = clean_records[start : start + chunk_size]
+            request = (
+                BatchCreateAppTableRecordRequest.builder()
+                .app_token(self._app_token)
+                .table_id(table_id)
+                .user_id_type("open_id")
+                .request_body(BatchCreateAppTableRecordRequestBody.builder().records(chunk).build())
+                .build()
+            )
+            request_started = mono_time.monotonic()
+            response = self._client.bitable.v1.app_table_record.batch_create(request)
+            request_cost = int((mono_time.monotonic() - request_started) * 1000)
+            self._ensure_success("bitable.v1.app_table_record.batch_create", response)
+            request_count += 1
+
+            body = response.data
+            chunk_records = len(body.records) if body and body.records else 0
+            logger.debug(
+                "Feishu API耗时: api=bitable.v1.app_table_record.batch_create table={} batch={} items={} cost={}ms",
+                table_id,
+                request_count,
+                chunk_records,
+                request_cost,
+            )
+            if body and body.records:
+                created_records.extend(body.records)
+
+        logger.debug(
+            (
+                "Feishu API汇总: api=bitable.v1.app_table_record.batch_create "
+                "table={} requests={} input_items={} output_items={} total={}ms"
+            ),
+            table_id,
+            request_count,
+            len(clean_records),
+            len(created_records),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
+        return created_records
+
+    def batch_update_records(self, table_id: str, records: list[AppTableRecord]) -> list[AppTableRecord]:
+        clean_records = [record for record in records if record and record.record_id and record.fields]
+        if not clean_records:
+            return []
+
+        started_at = mono_time.monotonic()
+        chunk_size = 500
+        updated_records: list[AppTableRecord] = []
+        request_count = 0
+
+        for start in range(0, len(clean_records), chunk_size):
+            chunk = clean_records[start : start + chunk_size]
+            request = (
+                BatchUpdateAppTableRecordRequest.builder()
+                .app_token(self._app_token)
+                .table_id(table_id)
+                .user_id_type("open_id")
+                .request_body(BatchUpdateAppTableRecordRequestBody.builder().records(chunk).build())
+                .build()
+            )
+            request_started = mono_time.monotonic()
+            response = self._client.bitable.v1.app_table_record.batch_update(request)
+            request_cost = int((mono_time.monotonic() - request_started) * 1000)
+            self._ensure_success("bitable.v1.app_table_record.batch_update", response)
+            request_count += 1
+
+            body = response.data
+            chunk_records = len(body.records) if body and body.records else 0
+            logger.debug(
+                "Feishu API耗时: api=bitable.v1.app_table_record.batch_update table={} batch={} items={} cost={}ms",
+                table_id,
+                request_count,
+                chunk_records,
+                request_cost,
+            )
+            if body and body.records:
+                updated_records.extend(body.records)
+
+        logger.debug(
+            (
+                "Feishu API汇总: api=bitable.v1.app_table_record.batch_update "
+                "table={} requests={} input_items={} output_items={} total={}ms"
+            ),
+            table_id,
+            request_count,
+            len(clean_records),
+            len(updated_records),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
+        return updated_records
 
     @staticmethod
     def _ensure_success(api_name: str, response: Any) -> None:
