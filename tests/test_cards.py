@@ -28,7 +28,7 @@ def test_card_uses_two_toggle_buttons_with_callback() -> None:
 
     card = json.loads(card_json)
     assert card["schema"] == "2.0"
-    assert card["header"]["title"]["content"] == "食堂预约 2026-02-13（周五）"
+    assert card["header"]["title"]["content"] == "食堂预约 2026-02-13 周五"
     elements = card["body"]["elements"]
     text = elements[0]["content"]
     assert text == "点击按钮切换预约状态\n预约截止时间为：午餐10:30，晚餐16:30"

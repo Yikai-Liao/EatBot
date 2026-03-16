@@ -66,6 +66,8 @@ class ScheduleConfig(BaseModel):
     send_time: str = "09:00"
     lunch_cutoff: str = "10:30"
     dinner_cutoff: str = "16:30"
+    lunch_min_reserved_count: int = 0
+    dinner_min_reserved_count: int = 0
     fee_archive_time: str = "21:00"
     fee_archive_day_of_month: int = 15
     send_stat_offset: str = "00:00:00"
@@ -88,6 +90,13 @@ class ScheduleConfig(BaseModel):
     def validate_schedule_cache_ttl_minutes(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("schedule_cache_ttl_minutes 必须大于 0")
+        return value
+
+    @field_validator("lunch_min_reserved_count", "dinner_min_reserved_count")
+    @classmethod
+    def validate_min_reserved_count(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("最小用餐人数不能小于 0")
         return value
 
     @field_validator("fee_archive_day_of_month")

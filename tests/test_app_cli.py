@@ -169,8 +169,8 @@ def test_dev_cron_preview(runner: CliRunner) -> None:
             snapshot = Mock(schedule_rules_count=3, enabled_user_count=5, stats_receiver_count=2)
             app.build_cron_preview_snapshot.return_value = snapshot
             app.preview_cron_action.side_effect = [
-                Mock(will_execute=False, detail="date=2026-02-14(周六); 规则结果=不发送"),
-                Mock(will_execute=True, detail="date=2026-02-14(周六); 餐次=午餐; 统计接收人=2"),
+                Mock(will_execute=False, detail="date=2026-02-14 周六; 规则结果=不发送"),
+                Mock(will_execute=True, detail="date=2026-02-14 周六; 餐次=午餐; 统计接收人=2"),
             ]
             mocked_load_config.return_value = build_runtime_config()
             mocked_bootstrap.return_value = app

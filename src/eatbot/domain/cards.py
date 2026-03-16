@@ -74,7 +74,7 @@ class ReservationCardBuilder:
                 "template": "blue",
                 "title": {
                     "tag": "plain_text",
-                    "content": f"食堂预约 {target_date.isoformat()}（{_weekday_text(target_date)}）",
+                    "content": f"食堂预约 {target_date.isoformat()} {_weekday_text(target_date)}",
                 },
             },
             "body": {

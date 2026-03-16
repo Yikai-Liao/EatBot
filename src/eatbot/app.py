@@ -258,25 +258,25 @@ class EatBotApplication:
             will_execute, detail = self._booking.preview_daily_cards(target_date=target_date, snapshot=snapshot)
             return CronActionPreview(
                 will_execute=will_execute,
-                detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+                detail=f"date={target_date.isoformat()} {weekday}; {detail}",
             )
         if action == CronAction.LUNCH_STATS:
             will_execute, detail = self._booking.preview_stats(meal=Meal.LUNCH, snapshot=snapshot)
             return CronActionPreview(
                 will_execute=will_execute,
-                detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+                detail=f"date={target_date.isoformat()} {weekday}; {detail}",
             )
         if action == CronAction.DINNER_STATS:
             will_execute, detail = self._booking.preview_stats(meal=Meal.DINNER, snapshot=snapshot)
             return CronActionPreview(
                 will_execute=will_execute,
-                detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+                detail=f"date={target_date.isoformat()} {weekday}; {detail}",
             )
         if action == CronAction.FEE_ARCHIVE:
             will_execute, detail = self._booking.preview_fee_archive(target_date=target_date)
             return CronActionPreview(
                 will_execute=will_execute,
-                detail=f"date={target_date.isoformat()}({weekday}); {detail}",
+                detail=f"date={target_date.isoformat()} {weekday}; {detail}",
             )
         raise ValueError(f"不支持的 cron action: {action}")
 

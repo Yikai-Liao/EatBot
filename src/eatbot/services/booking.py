@@ -121,8 +121,45 @@ class BookingService:
     def send_stats(self, target_date: date, meal: Meal) -> None:
         started_at = mono_time.monotonic()
         logger.info("统计发送开始: date={} meal={}", target_date.isoformat(), meal.value)
-        count = self._repository.count_meal_records(target_date=target_date, meal=meal)
+        reserved_rows = self._repository.list_reserved_meal_rows(target_date=target_date, meal=meal)
+        count = len(reserved_rows)
+        min_reserved_count = self._min_reserved_count(meal)
         receivers = self._repository.list_stats_receiver_open_ids()
+
+        if count < min_reserved_count:
+            self._repository.cancel_reserved_meal_rows(rows=reserved_rows)
+            cancel_detail = (
+                f"{_format_date_with_weekday(target_date)} {meal.value} 预约人数: {count}，"
+                f"小于最小用餐人数 {min_reserved_count} 人，本餐取消"
+            )
+            admin_text = f"[管理员] {cancel_detail}"
+            user_text = f"{cancel_detail}。请注意，需要自行解决{self._meal_fallback_text(meal)}。"
+            for open_id in receivers:
+                self._send_text_notice(
+                    open_id=open_id,
+                    text=admin_text,
+                    log_name="订餐统计管理员通知",
+                )
+            for row in reserved_rows:
+                if not row.open_id:
+                    continue
+                self._send_text_notice(
+                    open_id=row.open_id,
+                    text=user_text,
+                    log_name="订餐取消用户通知",
+                )
+            logger.info(
+                "订餐人数不足已取消: date={} meal={} count={} min_required={} receivers={} users={} cost={}ms",
+                target_date.isoformat(),
+                meal.value,
+                count,
+                min_reserved_count,
+                len(receivers),
+                len([row for row in reserved_rows if row.open_id]),
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
+            return
+
         if not receivers:
             logger.info(
                 "无统计接收人配置，跳过统计发送: date={} meal={} count={} cost={}ms",
@@ -133,9 +170,13 @@ class BookingService:
             )
             return
 
-        text = f"{target_date.isoformat()} {meal.value} 预约人数: {count}（{_weekday_text(target_date)}）"
+        text = f"[管理员] {_format_date_with_weekday(target_date)} {meal.value} 预约人数: {count}"
         for open_id in receivers:
-            self._im.send_text(open_id, text)
+            self._send_text_notice(
+                open_id=open_id,
+                text=text,
+                log_name="订餐统计管理员通知",
+            )
         logger.info(
             "统计发送完成: date={} meal={} count={} receivers={} cost={}ms",
             target_date.isoformat(),
@@ -293,13 +334,13 @@ class BookingService:
         if receivers:
             total_meal_count = total_lunch_count + total_dinner_count
             admin_text = (
-                f"餐费归档表已更新：{window.start_date.isoformat()}~"
+                f"[管理员] 餐费归档表已更新：{window.start_date.isoformat()}~"
                 f"{window.end_date.isoformat()}，"
                 f"午餐 {total_lunch_count} 人次，晚餐 {total_dinner_count} 人次，"
                 f"总计 {total_meal_count} 人次，总收款 {_format_decimal(total_fee)} 元。"
             )
             for open_id in receivers:
-                result = self._send_archive_notice(
+                result = self._send_text_notice(
                     open_id=open_id,
                     text=admin_text,
                     log_name="餐费归档管理员通知",
@@ -314,7 +355,7 @@ class BookingService:
             logger.info("无统计接收人配置，跳过餐费归档管理员通知")
 
         for open_id, user_text in user_notice_messages:
-            result = self._send_archive_notice(
+            result = self._send_text_notice(
                 open_id=open_id,
                 text=user_text,
                 log_name="餐费归档通知",
@@ -1155,6 +1196,21 @@ class BookingService:
             return now.time() < self._config.schedule.dinner_cutoff_obj
         return False
 
+    def _min_reserved_count(self, meal: Meal) -> int:
+        if meal == Meal.LUNCH:
+            return self._config.schedule.lunch_min_reserved_count
+        if meal == Meal.DINNER:
+            return self._config.schedule.dinner_min_reserved_count
+        return 0
+
+    @staticmethod
+    def _meal_fallback_text(meal: Meal) -> str:
+        if meal == Meal.LUNCH:
+            return "午餐"
+        if meal == Meal.DINNER:
+            return "晚餐"
+        return "用餐"
+
     def _build_meal_fee_archive_window(self, target_date: date) -> MealFeeArchiveWindow:
         day_of_month = self._config.schedule.fee_archive_day_of_month
         run_date = _resolve_monthly_day(
@@ -1192,7 +1248,7 @@ class BookingService:
     def _is_bot_unavailable_error(cls, exc: FeishuApiError) -> bool:
         return f"code={cls._FEISHU_BOT_UNAVAILABLE_CODE}" in str(exc)
 
-    def _send_archive_notice(self, *, open_id: str, text: str, log_name: str) -> str:
+    def _send_text_notice(self, *, open_id: str, text: str, log_name: str) -> str:
         try:
             self._im.send_text(open_id, text)
             return "sent"
@@ -1287,6 +1343,10 @@ def _pick_rows_by_meal(rows: list[Any], allowed_meals: set[Meal]) -> dict[Meal, 
 def _weekday_text(target_date: date) -> str:
     weekdays = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
     return weekdays[target_date.weekday()]
+
+
+def _format_date_with_weekday(target_date: date) -> str:
+    return f"{target_date.isoformat()} {_weekday_text(target_date)}"
 
 
 def _format_meals(meals: set[Meal]) -> str:

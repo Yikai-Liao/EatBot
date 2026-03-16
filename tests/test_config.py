@@ -578,3 +578,66 @@ def test_invalid_fee_archive_time_raise_error() -> None:
 
         with pytest.raises(ConfigError):
             load_runtime_config(shared_file, local_file)
+
+
+def test_negative_min_reserved_count_raise_error() -> None:
+    shared = textwrap.dedent(
+        """
+        app_token = "app"
+
+        [tables]
+        user_config = "t1"
+        meal_schedule = "t2"
+        meal_record = "t3"
+        stats_receivers = "t4"
+        meal_fee_archive = "t5"
+
+        [field_names.user_config]
+        display_name = "A"
+        user = "B"
+        meal_preference = "C"
+        lunch_price = "D"
+        dinner_price = "E"
+        enabled = "F"
+
+        [field_names.meal_schedule]
+        start_date = "A"
+        end_date = "B"
+        meals = "C"
+        remark = "D"
+
+        [field_names.meal_record]
+        date = "A"
+        user = "B"
+        meal_type = "C"
+        price = "D"
+        reservation_status = "E"
+
+        [field_names.stats_receivers]
+        user = "A"
+
+        [field_names.meal_fee_archive]
+        user = "用餐者"
+        start_date = "开始日期"
+        end_date = "结束日期"
+        fee = "费用"
+
+        [schedule]
+        lunch_min_reserved_count = -1
+        """
+    ).strip()
+    local = textwrap.dedent(
+        """
+        app_id = "id"
+        app_secret = "secret"
+        """
+    ).strip()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shared_file = Path(tmp) / "config.shared.toml"
+        local_file = Path(tmp) / "config.local.toml"
+        shared_file.write_text(shared, encoding="utf-8")
+        local_file.write_text(local, encoding="utf-8")
+
+        with pytest.raises(ConfigError):
+            load_runtime_config(shared_file, local_file)

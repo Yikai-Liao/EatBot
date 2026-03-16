@@ -111,6 +111,8 @@ class TestBookingServiceMock:
         self.repo = Mock()
         self.repo.upsert_meal_record.return_value = "rec_default"
         self.repo.list_user_meal_rows.return_value = []
+        self.repo.list_reserved_meal_rows.return_value = []
+        self.repo.cancel_reserved_meal_rows.return_value = 0
         self.repo.list_schedule_rules.return_value = []
         self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender"), make_user(open_id="ou_test")]
         self.repo.list_stats_receiver_open_ids.return_value = []
@@ -854,18 +856,51 @@ class TestBookingServiceMock:
         self.repo.cancel_meal_record.assert_not_called()
 
     def test_send_stats_to_all_receivers(self) -> None:
-        self.repo.count_meal_records.return_value = 3
+        self.repo.list_reserved_meal_rows.return_value = [
+            SimpleNamespace(open_id="ou_a", record_id="rec_1"),
+            SimpleNamespace(open_id="ou_b", record_id="rec_2"),
+            SimpleNamespace(open_id="ou_c", record_id="rec_3"),
+        ]
         self.repo.list_stats_receiver_open_ids.return_value = ["ou_1", "ou_2"]
 
         self.service.send_stats(target_date=date(2026, 2, 12), meal=Meal.LUNCH)
 
         self.im.send_text.assert_has_calls(
             [
-                call("ou_1", "2026-02-12 午餐 预约人数: 3（周四）"),
-                call("ou_2", "2026-02-12 午餐 预约人数: 3（周四）"),
+                call("ou_1", "[管理员] 2026-02-12 周四 午餐 预约人数: 3"),
+                call("ou_2", "[管理员] 2026-02-12 周四 午餐 预约人数: 3"),
             ]
         )
         assert self.im.send_text.call_count == 2
+        self.repo.cancel_reserved_meal_rows.assert_not_called()
+
+    def test_send_stats_cancel_meal_when_reserved_count_below_minimum(self) -> None:
+        config = build_config()
+        config.schedule.lunch_min_reserved_count = 3
+        service = BookingService(config=config, repository=self.repo, im=self.im)
+        self.repo.list_reserved_meal_rows.return_value = [
+            SimpleNamespace(open_id="ou_booked_1", record_id="rec_1"),
+            SimpleNamespace(open_id="ou_booked_2", record_id="rec_2"),
+        ]
+        self.repo.list_stats_receiver_open_ids.return_value = ["ou_admin"]
+
+        service.send_stats(target_date=date(2026, 2, 12), meal=Meal.LUNCH)
+
+        self.repo.cancel_reserved_meal_rows.assert_called_once_with(rows=self.repo.list_reserved_meal_rows.return_value)
+        self.im.send_text.assert_has_calls(
+            [
+                call("ou_admin", "[管理员] 2026-02-12 周四 午餐 预约人数: 2，小于最小用餐人数 3 人，本餐取消"),
+                call(
+                    "ou_booked_1",
+                    "2026-02-12 周四 午餐 预约人数: 2，小于最小用餐人数 3 人，本餐取消。请注意，需要自行解决午餐。",
+                ),
+                call(
+                    "ou_booked_2",
+                    "2026-02-12 周四 午餐 预约人数: 2，小于最小用餐人数 3 人，本餐取消。请注意，需要自行解决午餐。",
+                ),
+            ]
+        )
+        assert self.im.send_text.call_count == 3
 
     def test_preview_fee_archive_returns_skip_when_not_settlement_day(self) -> None:
         should_run, detail = self.service.preview_fee_archive(target_date=date(2026, 2, 14))
@@ -919,7 +954,7 @@ class TestBookingServiceMock:
         self.im.send_text.assert_has_calls(
             [
                 call("ou_sender", "餐费归档通知：2026-01-16~2026-02-15，你本月午餐 2 顿，晚餐 1 顿，共 3 顿，餐费合计 45 元。"),
-                call("ou_admin", "餐费归档表已更新：2026-01-16~2026-02-15，午餐 2 人次，晚餐 1 人次，总计 3 人次，总收款 45 元。"),
+                call("ou_admin", "[管理员] 餐费归档表已更新：2026-01-16~2026-02-15，午餐 2 人次，晚餐 1 人次，总计 3 人次，总收款 45 元。"),
             ],
             any_order=True,
         )
@@ -941,7 +976,7 @@ class TestBookingServiceMock:
         first_call = self.im.send_text.call_args_list[0]
         assert first_call == call(
             "ou_admin",
-            "餐费归档表已更新：2026-01-16~2026-02-15，午餐 2 人次，晚餐 1 人次，总计 3 人次，总收款 45 元。",
+            "[管理员] 餐费归档表已更新：2026-01-16~2026-02-15，午餐 2 人次，晚餐 1 人次，总计 3 人次，总收款 45 元。",
         )
 
     def test_archive_meal_fees_ignores_bot_unavailable_errors_for_user_notifications(self) -> None:

@@ -340,6 +340,28 @@ class BitableRepository:
         )
         return sum(1 for row in rows if row.meal_type == meal and row.reservation_status)
 
+    def list_reserved_meal_rows(self, *, target_date: date, meal: Meal) -> list[MealRecordRow]:
+        rows = self._list_meal_rows(
+            target_date=target_date,
+            open_id=None,
+            filter_expr=self._meal_record_date_range_filter(start_date=target_date, end_date=target_date),
+        )
+        return [row for row in rows if row.meal_type == meal and row.reservation_status]
+
+    def cancel_reserved_meal_rows(self, *, rows: list[MealRecordRow]) -> int:
+        if not rows:
+            return 0
+
+        table_id = self._table_id("meal_record")
+        payload = self._meal_update_payload(reservation_status=False)
+        records = [
+            AppTableRecord.builder().record_id(row.record_id).fields(payload).build()
+            for row in rows
+            if row.record_id
+        ]
+        self._bitable.batch_update_records(table_id=table_id, records=records)
+        return len(records)
+
     def list_user_meal_rows(self, *, target_date: date, open_id: str) -> list[MealRecordRow]:
         return self._list_meal_rows(target_date=target_date, open_id=open_id)
 

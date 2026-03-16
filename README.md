@@ -37,6 +37,7 @@
 
 ### 3.4 餐次统计发送
 - 每顿饭截止后，统计该餐用餐人数。
+- 若截止后预约人数小于 `schedule.lunch_min_reserved_count` / `schedule.dinner_min_reserved_count`，则自动取消该餐全部预约，并通知管理员与已预约用户。
 - 给“统计信息接收人员”表中的人员发送统计消息。
 
 ### 3.5 日期选择优先级
@@ -97,7 +98,7 @@
 - `config.shared.toml`：可提交，保存全局时区、字段名映射、定时参数等共享配置。
 - `config.local.toml`：本地私密，保存 app_id、app_secret、app_token、wiki_token、tables 与日志配置。
 - `timezone`（根级）用于定义全局业务时区，表格日期解析、定时任务与统计口径都按该时区计算。
-- `config.shared.toml` 中 `schedule` 段用于配置发卡时间、午/晚餐截止时间、统计偏移 `send_stat_offset` 以及用餐定时配置缓存时长 `schedule_cache_ttl_minutes`。
+- `config.shared.toml` 中 `schedule` 段用于配置发卡时间、午/晚餐截止时间、午/晚餐最小成团人数、统计偏移 `send_stat_offset` 以及用餐定时配置缓存时长 `schedule_cache_ttl_minutes`。
 - 用餐定时配置缓存默认 30 分钟；每日发卡任务开始前会强制刷新一次缓存，单批用户发送过程不重复拉表。
 - 加载建议：先加载 `config.shared.toml`，再用 `config.local.toml` 覆盖。
 - `config.local.toml` 日志配置示例：

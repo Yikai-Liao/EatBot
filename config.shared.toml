@@ -49,8 +49,12 @@ dinner_count = "晚餐数"
 send_time = "10:00"
 # 午餐截止时间（HH:MM）
 lunch_cutoff = "10:20"
+# 午餐最小成团人数；截止后若预约人数小于该值，则自动取消本餐全部预约
+lunch_min_reserved_count = 3
 # 晚餐截止时间（HH:MM）
 dinner_cutoff = "16:20"
+# 晚餐最小成团人数；截止后若预约人数小于该值，则自动取消本餐全部预约
+dinner_min_reserved_count = 3
 # 统计发送偏移（HH:MM:SS），表示在截止时间后多久发送统计
 send_stat_offset = "00:01:00"
 # 每月归档日（1-31；若当月不存在则自动回退到当月最后一天）
