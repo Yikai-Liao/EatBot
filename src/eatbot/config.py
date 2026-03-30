@@ -165,13 +165,50 @@ class LoggingConfig(BaseModel):
         return self.max_size_mb * 1024 * 1024
 
 
+class CommandsConfig(BaseModel):
+    today_card_texts: list[str] = Field(default_factory=lambda: ["订餐", "/eatbot today", "当日卡片", "卡片"])
+    help_texts: list[str] = Field(default_factory=lambda: ["帮助"])
+    payment_qr_texts: list[str] = Field(default_factory=lambda: ["付款码"])
+    today_card_menu_event_keys: list[str] = Field(default_factory=lambda: ["当日卡片"])
+    payment_qr_image_path: str = "assets/付款码.jpeg"
+
+    @field_validator(
+        "today_card_texts",
+        "help_texts",
+        "payment_qr_texts",
+        "today_card_menu_event_keys",
+    )
+    @classmethod
+    def validate_command_list(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if not text:
+                raise ValueError("命令配置不能为空字符串")
+            if text in normalized:
+                continue
+            normalized.append(text)
+        if not normalized:
+            raise ValueError("命令配置不能为空")
+        return normalized
+
+    @field_validator("payment_qr_image_path")
+    @classmethod
+    def validate_payment_qr_image_path(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("payment_qr_image_path 不能为空")
+        return normalized
+
+
 class RuntimeConfig(BaseModel):
     app_id: str
     app_secret: str
     app_token: str
-    help_doc: str = "发送“卡片”获取当日预约卡片，发送“帮助”查看帮助文档。"
+    help_doc: str = "发送“卡片”获取当日预约卡片，发送“付款码”获取付款码，发送“帮助”查看帮助文档。"
     timezone: str = "Asia/Shanghai"
     wiki_token: str | None = None
+    commands: CommandsConfig = Field(default_factory=CommandsConfig)
     tables: TablesConfig
     field_names: FieldNamesConfig
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)

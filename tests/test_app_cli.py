@@ -162,6 +162,29 @@ def test_send_stats_command_all(runner: CliRunner) -> None:
     app.send_stats_once.assert_called_once_with(target_date=date(2026, 2, 14), meal=None)
 
 
+def test_send_text_command_broadcasts_to_enabled_users(runner: CliRunner) -> None:
+    with patch("eatbot.app._bootstrap_application") as mocked_bootstrap:
+        app = Mock()
+        mocked_bootstrap.return_value = app
+
+        result = runner.invoke(cli, ["send", "text", "上面为食堂付款测试，不需要付钱"])
+
+    assert result.exit_code == 0, result.output
+    mocked_bootstrap.assert_called_once_with()
+    app.send_text_once.assert_called_once_with(text="上面为食堂付款测试，不需要付钱")
+
+
+def test_send_text_command_joins_multiple_unquoted_parts(runner: CliRunner) -> None:
+    with patch("eatbot.app._bootstrap_application") as mocked_bootstrap:
+        app = Mock()
+        mocked_bootstrap.return_value = app
+
+        result = runner.invoke(cli, ["send", "text", "上面为食堂付款测试，不需要", "付钱"])
+
+    assert result.exit_code == 0, result.output
+    app.send_text_once.assert_called_once_with(text="上面为食堂付款测试，不需要 付钱")
+
+
 def test_dev_cron_preview(runner: CliRunner) -> None:
     with patch("eatbot.app._load_runtime_config_or_exit") as mocked_load_config:
         with patch("eatbot.app._bootstrap_application") as mocked_bootstrap:

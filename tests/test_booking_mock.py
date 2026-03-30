@@ -290,6 +290,18 @@ class TestBookingServiceMock:
             mocked.assert_not_called()
             self.im.send_text.assert_called_once_with("ou_sender", self.service._config.help_doc)
 
+    def test_handle_message_event_payment_qr_command_sends_payment_qr(self) -> None:
+        with patch.object(self.service, "_send_payment_qr_notice") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    message=SimpleNamespace(message_type="text", content='{"text":"付款码"}'),
+                    sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_message_event(data)
+
+            mocked.assert_called_once_with(open_id="ou_sender", log_name="付款码")
+
     def test_handle_message_event_unknown_text_sends_help_doc(self) -> None:
         with patch.object(self.service, "send_card_to_user_today") as mocked:
             data = SimpleNamespace(
@@ -902,6 +914,23 @@ class TestBookingServiceMock:
         )
         assert self.im.send_text.call_count == 3
 
+    def test_send_text_to_enabled_users_only(self) -> None:
+        self.repo.list_user_profiles.return_value = [
+            make_user(open_id="ou_enabled_1", enabled=True),
+            make_user(open_id="ou_disabled", enabled=False),
+            make_user(open_id="ou_enabled_2", enabled=True),
+        ]
+
+        self.service.send_text_to_enabled_users("测试消息")
+
+        self.im.send_text.assert_has_calls(
+            [
+                call("ou_enabled_1", "测试消息"),
+                call("ou_enabled_2", "测试消息"),
+            ]
+        )
+        assert self.im.send_text.call_count == 2
+
     def test_preview_fee_archive_returns_skip_when_not_settlement_day(self) -> None:
         should_run, detail = self.service.preview_fee_archive(target_date=date(2026, 2, 14))
 
@@ -959,6 +988,7 @@ class TestBookingServiceMock:
             any_order=True,
         )
         assert self.im.send_text.call_count == 2
+        self.im.send_image_file.assert_called_once_with("ou_sender", self.service._payment_qr_image_path)
 
     def test_archive_meal_fees_sends_admin_notice_before_user_notices(self) -> None:
         self.repo.list_meal_fee_summaries.return_value = [
@@ -1002,6 +1032,7 @@ class TestBookingServiceMock:
             "餐费归档通知：2026-01-16~2026-02-15，你本月午餐 2 顿，晚餐 1 顿，共 3 顿，餐费合计 45 元。",
         )
         assert self.im.send_text.call_count == 1
+        self.im.send_image_file.assert_not_called()
 
     def test_archive_meal_fees_skip_when_not_settlement_day(self) -> None:
         result = self.service.archive_meal_fees(target_date=date(2026, 2, 14))

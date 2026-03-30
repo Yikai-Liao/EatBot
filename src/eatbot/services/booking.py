@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
+from pathlib import Path
 import threading
 import time as mono_time
 from typing import Any, Callable
@@ -61,9 +62,6 @@ class CardCallbackUpdateContext:
 
 class BookingService:
     _ALL_MEALS = {Meal.LUNCH, Meal.DINNER}
-    _TODAY_CARD_TEXT_COMMANDS = frozenset({"订餐", "/eatbot today", "当日卡片", "卡片"})
-    _HELP_TEXT_COMMANDS = frozenset({"帮助"})
-    _TODAY_CARD_MENU_EVENT_KEYS = frozenset({"当日卡片"})
     _USER_NOT_FOUND_TEXT = "你不在后台用户列表中，请联系管理员。"
     _FEISHU_BOT_UNAVAILABLE_CODE = "230013"
 
@@ -83,6 +81,11 @@ class BookingService:
         self._decider = MealPlanDecider()
         self._timezone = ZoneInfo(config.timezone)
         self._now_provider = now_provider
+        self._today_card_text_commands = frozenset(config.commands.today_card_texts)
+        self._help_text_commands = frozenset(config.commands.help_texts)
+        self._payment_qr_text_commands = frozenset(config.commands.payment_qr_texts)
+        self._today_card_menu_event_keys = frozenset(config.commands.today_card_menu_event_keys)
+        self._payment_qr_image_path = self._resolve_project_path(config.commands.payment_qr_image_path)
         self._card_action_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eatbot-card-action")
         self._background_runner = background_runner or self._default_background_runner
         self._processing_users: set[str] = set()
@@ -183,6 +186,38 @@ class BookingService:
             meal.value,
             count,
             len(receivers),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
+
+    def send_text_to_enabled_users(self, text: str) -> None:
+        started_at = mono_time.monotonic()
+        users = [user for user in self._repository.list_user_profiles() if user.enabled]
+        if not users:
+            logger.info("无启用用户配置，跳过文本发送")
+            return
+
+        sent = 0
+        skipped = 0
+        failed = 0
+        for user in users:
+            result = self._send_text_notice(
+                open_id=user.open_id,
+                text=text,
+                log_name="批量文本通知",
+            )
+            if result == "sent":
+                sent += 1
+            elif result == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+
+        logger.info(
+            "批量文本发送完成: users={} sent={} skipped={} failed={} cost={}ms",
+            len(users),
+            sent,
+            skipped,
+            failed,
             int((mono_time.monotonic() - started_at) * 1000),
         )
 
@@ -362,6 +397,7 @@ class BookingService:
             )
             if result == "sent":
                 user_notice_sent += 1
+                self._send_payment_qr_notice(open_id=open_id, log_name="付款码")
             elif result == "skipped":
                 user_notice_skipped += 1
             else:
@@ -408,10 +444,13 @@ class BookingService:
             return
 
         text = _extract_text_from_message_content(message.content)
-        if text in self._TODAY_CARD_TEXT_COMMANDS:
+        if text in self._today_card_text_commands:
             self.send_card_to_user_today(sender_open_id)
             return
-        if text in self._HELP_TEXT_COMMANDS:
+        if text in self._payment_qr_text_commands:
+            self._send_payment_qr_notice(open_id=sender_open_id, log_name="付款码")
+            return
+        if text in self._help_text_commands:
             self._im.send_text(sender_open_id, self._config.help_doc)
             return
 
@@ -426,7 +465,7 @@ class BookingService:
 
         if not operator_open_id:
             return
-        if event_key not in self._TODAY_CARD_MENU_EVENT_KEYS:
+        if event_key not in self._today_card_menu_event_keys:
             return
         self.send_card_to_user_today(operator_open_id)
 
@@ -1272,6 +1311,48 @@ class BookingService:
                 str(exc),
             )
             return "failed"
+
+    def _send_payment_qr_notice(self, *, open_id: str, log_name: str) -> str:
+        try:
+            self._im.send_image_file(open_id, self._payment_qr_image_path)
+            return "sent"
+        except FileNotFoundError as exc:
+            logger.warning(
+                "发送{}失败: open_id={} image_path={} error_type={} error={}",
+                log_name,
+                open_id,
+                str(self._payment_qr_image_path),
+                exc.__class__.__name__,
+                str(exc),
+            )
+            return "failed"
+        except FeishuApiError as exc:
+            if self._is_bot_unavailable_error(exc):
+                logger.warning(
+                    "发送{}跳过: open_id={} reason=bot_no_availability code={}",
+                    log_name,
+                    open_id,
+                    self._FEISHU_BOT_UNAVAILABLE_CODE,
+                )
+                return "skipped"
+            logger.warning("发送{}失败: open_id={} error={}", log_name, open_id, str(exc))
+            return "failed"
+        except Exception as exc:
+            logger.warning(
+                "发送{}失败: open_id={} error_type={} error={}",
+                log_name,
+                open_id,
+                exc.__class__.__name__,
+                str(exc),
+            )
+            return "failed"
+
+    @staticmethod
+    def _resolve_project_path(path_value: str) -> Path:
+        path = Path(path_value).expanduser()
+        if path.is_absolute():
+            return path
+        return Path(__file__).resolve().parents[3] / path
 
     @staticmethod
     def _toast(

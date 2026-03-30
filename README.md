@@ -130,7 +130,7 @@ max_size_mb = 20
 ## 7. 当前实现状态（2026-02-14）
 - 已实现完整主流程：工作日发卡、卡片交互回写、截止控制、午晚餐统计发送。
 - 已接入飞书长连接事件：`im.message.receive_v1`、`application.bot.menu_v6`、`card.action.trigger`。
-- CLI 已统一为 Typer 命令树：`run`、`check`、`send cards`、`send stats`、`dev listen`、`dev cron`。
+- CLI 已统一为 Typer 命令树：`run`、`check`、`send cards`、`send stats`、`send text`、`dev listen`、`dev cron`。
 - 日志体系已统一为 Loguru：命令行输出与文件持久化同时启用，支持文件大小轮转。
 - 测试框架已统一为 Pytest，覆盖配置加载、CLI 参数、核心业务规则与卡片处理。
 
@@ -155,7 +155,8 @@ eatbot
 ├─ run
 ├─ send
 │  ├─ cards
-│  └─ stats
+│  ├─ stats
+│  └─ text
 └─ dev
    ├─ listen
    └─ cron
@@ -178,6 +179,10 @@ eatbot
 - `eatbot send stats --meal lunch|dinner|all [--date YYYY-MM-DD]`
 - 一次性发送统计消息，`--date` 不传默认当天。
 
+- `eatbot send text TEXT...`
+- 一次性给所有已启用用户发送文本消息，不启动常驻服务。
+- `TEXT...` 会把命令行剩余内容按空格拼接成一条消息。
+
 - `eatbot dev listen [--at YYYY-MM-DDTHH:MM[:SS]]`
 - 开发联调模式：仅启动长连接，不启动定时任务。
 - `--at` 用于注入虚拟当前时间（截止逻辑联调）。
@@ -198,6 +203,7 @@ eatbot
 - `uv run eatbot run --log-level debug`
 - `uv run eatbot send cards --date 2026-02-14`
 - `uv run eatbot send stats --meal lunch --date 2026-02-14`
+- `uv run eatbot send text 上面为食堂付款测试，不需要付钱`
 - `uv run eatbot dev listen --at 2026-02-14T10:31:30`
 - `uv run eatbot dev cron --from 2026-02-14T09:00:00 --to 2026-02-14T11:00:00`
 - `uv run eatbot dev cron --from 2026-02-14T09:00:00 --to 2026-02-14T11:00:00 --execute`

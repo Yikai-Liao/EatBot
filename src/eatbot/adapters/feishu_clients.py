@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import time as mono_time
 from typing import Any
 
@@ -20,6 +21,7 @@ from lark_oapi.api.bitable.v1 import (
     ListAppTableRecordRequest,
     UpdateAppTableRecordRequest,
 )
+from lark_oapi.api.im.v1 import CreateImageRequest, CreateImageRequestBody
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
 
@@ -382,10 +384,47 @@ class BitableAdapter:
 class IMAdapter:
     def __init__(self, client: lark.Client) -> None:
         self._client = client
+        self._image_key_cache: dict[tuple[str, int], str] = {}
 
     def send_text(self, receive_id: str, text: str, receive_id_type: str = "open_id") -> str:
         content = json.dumps({"text": text}, ensure_ascii=False)
         return self._send(receive_id=receive_id, receive_id_type=receive_id_type, msg_type="text", content=content)
+
+    def send_image(self, receive_id: str, image_key: str, receive_id_type: str = "open_id") -> str:
+        content = json.dumps({"image_key": image_key}, ensure_ascii=False)
+        return self._send(receive_id=receive_id, receive_id_type=receive_id_type, msg_type="image", content=content)
+
+    def upload_image(self, image_path: str | Path) -> str:
+        path = Path(image_path).expanduser().resolve()
+        stat = path.stat()
+        cache_key = (str(path), stat.st_mtime_ns)
+        cached_image_key = self._image_key_cache.get(cache_key)
+        if cached_image_key:
+            return cached_image_key
+
+        with path.open("rb") as image_file:
+            request = (
+                CreateImageRequest.builder()
+                .request_body(
+                    CreateImageRequestBody.builder()
+                    .image_type("message")
+                    .image(image_file)
+                    .build()
+                )
+                .build()
+            )
+            response = self._client.im.v1.image.create(request)
+
+        BitableAdapter._ensure_success("im.v1.image.create", response)
+        if response.data is None or response.data.image_key is None:
+            raise FeishuApiError("上传图片失败: image_key 为空")
+
+        self._image_key_cache[cache_key] = response.data.image_key
+        return response.data.image_key
+
+    def send_image_file(self, receive_id: str, image_path: str | Path, receive_id_type: str = "open_id") -> str:
+        image_key = self.upload_image(image_path)
+        return self.send_image(receive_id=receive_id, image_key=image_key, receive_id_type=receive_id_type)
 
     def send_interactive(self, receive_id: str, card_json: str, receive_id_type: str = "open_id") -> str:
         return self._send(

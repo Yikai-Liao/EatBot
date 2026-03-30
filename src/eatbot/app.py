@@ -215,6 +215,11 @@ class EatBotApplication:
             return
         self._booking.send_stats(target, meal)
 
+    def send_text_once(self, *, text: str) -> None:
+        if self._booking is None:
+            raise RuntimeError("应用未初始化")
+        self._booking.send_text_to_enabled_users(text)
+
     def execute_cron_action(self, action: CronAction, *, run_at: datetime) -> None:
         if self._config is None or self._booking is None:
             raise RuntimeError("应用未初始化")
@@ -580,6 +585,19 @@ def send_stats_command(
         logger.info("统计发送完成: meal={} date=today", meal.value)
     else:
         logger.info("统计发送完成: meal={} date={}", meal.value, parsed_date.isoformat())
+
+
+@send_cli.command("text", help="一次性给所有已启用用户发送文本消息，不启动常驻服务。")
+def send_text_command(
+    text_parts: list[str] = typer.Argument(..., metavar="TEXT...", help="要发送的文本内容。"),
+) -> None:
+    text = " ".join(part for part in text_parts if part).strip()
+    if not text:
+        raise typer.BadParameter("文本消息不能为空")
+
+    app = _bootstrap_application()
+    app.send_text_once(text=text)
+    logger.info("批量文本发送完成")
 
 
 @dev_cli.command("listen", help="开发联调模式：仅启动长连接，不启动定时任务。")

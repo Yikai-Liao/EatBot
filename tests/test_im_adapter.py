@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -12,11 +14,20 @@ from eatbot.adapters.feishu_clients import FeishuApiError, IMAdapter
 
 
 class _FakeResponse:
-    def __init__(self, *, ok: bool, code: int = 0, msg: str = "ok", log_id: str = "log") -> None:
+    def __init__(
+        self,
+        *,
+        ok: bool,
+        code: int = 0,
+        msg: str = "ok",
+        log_id: str = "log",
+        data: object | None = None,
+    ) -> None:
         self._ok = ok
         self.code = code
         self.msg = msg
         self._log_id = log_id
+        self.data = data
 
     def success(self) -> bool:
         return self._ok
@@ -57,3 +68,28 @@ def test_delay_update_card_raises_when_feishu_api_fails() -> None:
 
     with pytest.raises(FeishuApiError):
         adapter.delay_update_card(token="callback-token", toast_content="同步结束")
+
+
+def test_send_image_file_uploads_image_then_sends_image_message(tmp_path: Path) -> None:
+    image_file = tmp_path / "付款码.jpeg"
+    image_file.write_bytes(b"fake-image")
+    client = Mock()
+    client.im.v1.image.create.return_value = _FakeResponse(
+        ok=True,
+        data=SimpleNamespace(image_key="img_v3"),
+    )
+    client.im.v1.message.create.return_value = _FakeResponse(
+        ok=True,
+        data=SimpleNamespace(message_id="om_v3"),
+    )
+    adapter = IMAdapter(client)
+
+    message_id = adapter.send_image_file("ou_sender", image_file)
+
+    assert message_id == "om_v3"
+    upload_request = client.im.v1.image.create.call_args.args[0]
+    assert upload_request.request_body.image_type == "message"
+    send_request = client.im.v1.message.create.call_args.args[0]
+    assert send_request.request_body.receive_id == "ou_sender"
+    assert send_request.request_body.msg_type == "image"
+    assert json.loads(send_request.request_body.content) == {"image_key": "img_v3"}
