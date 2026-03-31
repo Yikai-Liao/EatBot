@@ -88,12 +88,13 @@ def build_action_value(
     allowed_meals: list[str],
     default_meals: list[str],
     selected_meals: list[str],
+    target_date: str = "2026-12-31",
     toggle_meal: str | None = None,
     meal_record_ids: dict[str, str | None] | None = None,
 ) -> dict:
     value = {
         "action": action,
-        "target_date": "2099-01-01",
+        "target_date": target_date,
         "target_open_id": target_open_id,
         "allowed_meals": allowed_meals,
         "default_meals": default_meals,
@@ -211,7 +212,7 @@ class TestBookingServiceMock:
         )
 
     def test_preview_daily_cards_reports_skip_on_weekend_default_rule(self) -> None:
-        target_date = date(2026, 2, 14)
+        target_date = date(2026, 11, 1)
         self.repo.list_schedule_rules.return_value = []
         self.repo.list_user_profiles.return_value = [make_user(open_id="ou_1", enabled=True)]
         self.repo.list_stats_receiver_open_ids.return_value = ["ou_stat_1"]
@@ -224,9 +225,10 @@ class TestBookingServiceMock:
         assert snapshot.stats_receiver_count == 1
         assert will_execute is False
         assert "规则结果=不发送" in detail
+        assert "默认规则=周末休班" in detail
 
     def test_preview_daily_cards_reports_execute_when_rule_matches(self) -> None:
-        target_date = date(2026, 2, 14)
+        target_date = date(2026, 11, 1)
         self.repo.list_schedule_rules.return_value = [
             MealScheduleRule(
                 start_date=target_date,
@@ -242,6 +244,7 @@ class TestBookingServiceMock:
 
         assert will_execute is True
         assert "规则餐次=晚餐" in detail
+        assert "规则来源=用餐定时配置" in detail
         assert "启用用户=1" in detail
 
     def test_handle_message_event_triggers_today_card(self) -> None:
@@ -357,7 +360,7 @@ class TestBookingServiceMock:
         response = self.service.handle_card_action(data)
 
         self.repo.upsert_meal_record.assert_called_once_with(
-            target_date=date(2099, 1, 1),
+            target_date=date(2026, 12, 31),
             open_id="ou_sender",
             meal=Meal.LUNCH,
             price=Decimal("20"),
@@ -416,7 +419,7 @@ class TestBookingServiceMock:
         response = self.service.handle_card_action(data)
 
         self.repo.upsert_meal_record.assert_called_once_with(
-            target_date=date(2099, 1, 1),
+            target_date=date(2026, 12, 31),
             open_id="ou_sender",
             meal=Meal.DINNER,
             price=Decimal("25"),
@@ -424,7 +427,7 @@ class TestBookingServiceMock:
             prefer_direct=True,
         )
         self.repo.list_user_meal_rows.assert_called_with(
-            target_date=date(2099, 1, 1),
+            target_date=date(2026, 12, 31),
             open_id="ou_sender",
         )
         assert response.toast.type == "info"
@@ -461,7 +464,7 @@ class TestBookingServiceMock:
         response = self.service.handle_card_frame_action(data)
 
         self.repo.cancel_meal_record.assert_called_once_with(
-            target_date=date(2099, 1, 1),
+            target_date=date(2026, 12, 31),
             open_id="ou_sender",
             meal=Meal.LUNCH,
             record_id="rec_lunch",
@@ -471,7 +474,7 @@ class TestBookingServiceMock:
         assert response["card"]["type"] == "raw"
 
     def test_handle_card_action_revalidate_schedule_and_cancel_disallowed_meal(self) -> None:
-        target_date = date(2099, 1, 1)
+        target_date = date(2026, 12, 31)
         self.repo.list_schedule_rules.return_value = [
             MealScheduleRule(
                 start_date=target_date,
@@ -545,7 +548,7 @@ class TestBookingServiceMock:
         self.repo.upsert_meal_record.assert_not_called()
         self.repo.cancel_meal_record.assert_not_called()
         self.repo.list_user_meal_rows.assert_called_with(
-            target_date=date(2099, 1, 1),
+            target_date=date(2026, 12, 31),
             open_id="ou_sender",
         )
         assert response.toast.type == "info"
@@ -814,7 +817,7 @@ class TestBookingServiceMock:
             config=build_config(),
             repository=self.repo,
             im=self.im,
-            now_provider=lambda: datetime(2099, 1, 1, 21, 0),
+            now_provider=lambda: datetime(2026, 12, 31, 21, 0),
             background_runner=tasks.append,
         )
         data = SimpleNamespace(
@@ -914,6 +917,35 @@ class TestBookingServiceMock:
         )
         assert self.im.send_text.call_count == 3
 
+    def test_send_stats_skips_weekend_before_minimum_count_check(self) -> None:
+        config = build_config()
+        config.schedule.lunch_min_reserved_count = 3
+        service = BookingService(config=config, repository=self.repo, im=self.im)
+        self.repo.list_stats_receiver_open_ids.return_value = ["ou_admin"]
+
+        service.send_stats(target_date=date(2026, 11, 1), meal=Meal.LUNCH)
+
+        self.repo.list_reserved_meal_rows.assert_not_called()
+        self.repo.cancel_reserved_meal_rows.assert_not_called()
+        self.im.send_text.assert_not_called()
+
+    def test_send_stats_executes_on_makeup_workday(self) -> None:
+        config = build_config()
+        config.schedule.lunch_min_reserved_count = 3
+        service = BookingService(config=config, repository=self.repo, im=self.im)
+        self.repo.list_reserved_meal_rows.return_value = [
+            SimpleNamespace(open_id="ou_booked_1", record_id="rec_1"),
+            SimpleNamespace(open_id="ou_booked_2", record_id="rec_2"),
+            SimpleNamespace(open_id="ou_booked_3", record_id="rec_3"),
+        ]
+        self.repo.list_stats_receiver_open_ids.return_value = ["ou_admin"]
+
+        service.send_stats(target_date=date(2026, 5, 9), meal=Meal.LUNCH)
+
+        self.repo.list_reserved_meal_rows.assert_called_once_with(target_date=date(2026, 5, 9), meal=Meal.LUNCH)
+        self.repo.cancel_reserved_meal_rows.assert_not_called()
+        self.im.send_text.assert_called_once_with("ou_admin", "[管理员] 2026-05-09 周六 午餐 预约人数: 3")
+
     def test_send_text_to_enabled_users_only(self) -> None:
         self.repo.list_user_profiles.return_value = [
             make_user(open_id="ou_enabled_1", enabled=True),
@@ -947,6 +979,16 @@ class TestBookingServiceMock:
 
         assert should_run is True
         assert "归档区间=2026-02-01~2026-02-28（闭区间）" in detail
+
+    def test_preview_fee_archive_runs_on_holiday_when_day_matches(self) -> None:
+        config = build_config()
+        config.schedule.fee_archive_day_of_month = 1
+        service = BookingService(config=config, repository=self.repo, im=self.im)
+
+        should_run, detail = service.preview_fee_archive(target_date=date(2026, 10, 1))
+
+        assert should_run is True
+        assert "归档区间=2026-09-02~2026-10-01（闭区间）" in detail
 
     def test_archive_meal_fees_updates_table_and_sends_notifications(self) -> None:
         self.repo.list_meal_fee_summaries.return_value = [
@@ -1061,7 +1103,7 @@ class TestBookingServiceMock:
             config=build_config(),
             repository=self.repo,
             im=self.im,
-            now_provider=lambda: datetime(2099, 1, 1, 21, 0),
+            now_provider=lambda: datetime(2026, 12, 31, 21, 0),
         )
         data = SimpleNamespace(
             event=SimpleNamespace(
@@ -1092,7 +1134,7 @@ class TestBookingServiceMock:
             config=build_config(),
             repository=self.repo,
             im=self.im,
-            now_provider=lambda: datetime(2099, 1, 1, 9, 0),
+            now_provider=lambda: datetime(2026, 12, 31, 9, 0),
         )
         data = SimpleNamespace(
             event=SimpleNamespace(

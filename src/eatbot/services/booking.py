@@ -24,7 +24,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 from eatbot.config import RuntimeConfig
 from eatbot.domain.cards import ReservationCardBuilder
 from eatbot.domain.decision import MealPlanDecider, parse_meals
-from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
+from eatbot.domain.models import DailyMealPlan, Meal, MealScheduleRule, UserProfile
 from eatbot.services.repositories import BitableRepository, MealFeeArchiveRecord
 from eatbot.adapters.feishu_clients import FeishuApiError, IMAdapter
 
@@ -34,6 +34,7 @@ class CronPreviewSnapshot:
     schedule_rules_count: int
     enabled_user_count: int
     stats_receiver_count: int
+    plans_by_date: dict[date, DailyMealPlan]
     rules_by_date: dict[date, set[Meal]]
     matched_rule_count_by_date: dict[date, int]
 
@@ -93,10 +94,9 @@ class BookingService:
 
     def send_daily_cards(self, target_date: date | None = None) -> None:
         target = target_date or self._now().date()
-        rules = self._list_schedule_rules(force_refresh=True)
-        plan = self._decider.decide(target, rules)
+        plan = self._plan_for_date(target, force_refresh=True)
         if not plan.meals:
-            logger.info("今天不发送订餐卡片: date={}", target.isoformat())
+            logger.info("今天不发送订餐卡片: date={} reason={}", target.isoformat(), plan.reason)
             return
 
         users = [user for user in self._repository.list_user_profiles() if user.enabled]
@@ -113,10 +113,9 @@ class BookingService:
             self._im.send_text(open_id, self._USER_NOT_FOUND_TEXT)
             return
 
-        rules = self._list_schedule_rules()
-        plan = self._decider.decide(today, rules)
+        plan = self._plan_for_date(today)
         if not plan.meals:
-            self._im.send_text(open_id, f"{today.isoformat()} 不在订餐发送范围。")
+            self._im.send_text(open_id, f"{today.isoformat()} 不在订餐发送范围（{plan.reason}）。")
             return
 
         self._send_card_to_user(user=user, target_date=today, allowed_meals=plan.meals)
@@ -124,6 +123,18 @@ class BookingService:
     def send_stats(self, target_date: date, meal: Meal) -> None:
         started_at = mono_time.monotonic()
         logger.info("统计发送开始: date={} meal={}", target_date.isoformat(), meal.value)
+        plan = self._plan_for_date(target_date)
+        if meal not in plan.meals:
+            logger.info(
+                "当前餐次不在执行范围，跳过统计发送: date={} meal={} source={} reason={} allowed={}",
+                target_date.isoformat(),
+                meal.value,
+                plan.source,
+                plan.reason,
+                _format_meals(plan.meals),
+            )
+            return
+
         reserved_rows = self._repository.list_reserved_meal_rows(target_date=target_date, meal=meal)
         count = len(reserved_rows)
         min_reserved_count = self._min_reserved_count(meal)
@@ -226,19 +237,20 @@ class BookingService:
         enabled_user_count = sum(1 for user in self._repository.list_user_profiles() if user.enabled)
         stats_receiver_count = len(self._repository.list_stats_receiver_open_ids())
 
+        plans_by_date: dict[date, DailyMealPlan] = {}
         rules_by_date: dict[date, set[Meal]] = {}
         matched_rule_count_by_date: dict[date, int] = {}
         for target_date in target_dates:
-            matched_rule_count_by_date[target_date] = sum(
-                1 for rule in rules if rule.start_date <= target_date <= rule.end_date
-            )
             plan = self._decider.decide(target_date, rules)
+            plans_by_date[target_date] = plan
             rules_by_date[target_date] = set(plan.meals)
+            matched_rule_count_by_date[target_date] = plan.matched_rule_count
 
         return CronPreviewSnapshot(
             schedule_rules_count=len(rules),
             enabled_user_count=enabled_user_count,
             stats_receiver_count=stats_receiver_count,
+            plans_by_date=plans_by_date,
             rules_by_date=rules_by_date,
             matched_rule_count_by_date=matched_rule_count_by_date,
         )
@@ -251,35 +263,44 @@ class BookingService:
     ) -> tuple[bool, str]:
         if snapshot is None:
             snapshot = self.build_cron_preview_snapshot(target_dates={target_date})
-        meals = snapshot.rules_by_date.get(target_date, set())
+        plan = snapshot.plans_by_date.get(target_date) or self._plan_for_date(target_date)
+        meals = set(plan.meals)
         if not meals:
-            matched_rule_count = snapshot.matched_rule_count_by_date.get(target_date, 0)
-            if matched_rule_count > 0:
+            if plan.source == "schedule_rule":
                 return False, "规则结果=不发送; 命中规则但餐次为空"
             return (
                 False,
-                "规则结果=不发送; 周末默认不发送",
+                f"规则结果=不发送; 默认规则={plan.reason}",
             )
 
         meals_text = _format_meals(meals)
+        source_text = "规则来源=用餐定时配置" if plan.source == "schedule_rule" else f"默认规则={plan.reason}"
         if snapshot.enabled_user_count <= 0:
             return (
                 False,
-                f"规则餐次={meals_text}; 启用用户=0",
+                f"规则餐次={meals_text}; {source_text}; 启用用户=0",
             )
         return (
             True,
-            f"规则餐次={meals_text}; 启用用户={snapshot.enabled_user_count}",
+            f"规则餐次={meals_text}; {source_text}; 启用用户={snapshot.enabled_user_count}",
         )
 
     def preview_stats(
         self,
         *,
+        target_date: date,
         meal: Meal,
         snapshot: CronPreviewSnapshot | None = None,
     ) -> tuple[bool, str]:
         if snapshot is None:
-            snapshot = self.build_cron_preview_snapshot(target_dates=set())
+            snapshot = self.build_cron_preview_snapshot(target_dates={target_date})
+        plan = snapshot.plans_by_date.get(target_date) or self._plan_for_date(target_date)
+        if meal not in plan.meals:
+            if plan.source == "schedule_rule":
+                if not plan.meals:
+                    return False, f"餐次={meal.value}; 命中用餐定时配置但当日不供餐"
+                return False, f"餐次={meal.value}; 当日可订餐次={_format_meals(plan.meals)}"
+            return False, f"餐次={meal.value}; 默认规则={plan.reason}"
         if snapshot.stats_receiver_count <= 0:
             return False, f"餐次={meal.value}; 统计接收人=0"
         return True, f"餐次={meal.value}; 统计接收人={snapshot.stats_receiver_count}"
@@ -1164,10 +1185,12 @@ class BookingService:
         )
         return list(rules)
 
+    def _plan_for_date(self, target_date: date, *, force_refresh: bool = False) -> DailyMealPlan:
+        rules = self._list_schedule_rules(force_refresh=force_refresh)
+        return self._decider.decide(target_date, rules)
+
     def _allowed_meals_for_date(self, target_date: date) -> set[Meal]:
-        rules = self._list_schedule_rules()
-        plan = self._decider.decide(target_date, rules)
-        return set(plan.meals)
+        return set(self._plan_for_date(target_date).meals)
 
     @staticmethod
     def _build_meal_prices(*, user: UserProfile, allowed_meals: set[Meal]) -> dict[Meal, Decimal]:

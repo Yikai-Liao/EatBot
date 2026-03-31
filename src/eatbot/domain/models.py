@@ -33,6 +33,9 @@ class MealScheduleRule:
 class DailyMealPlan:
     date: date
     meals: set[Meal]
+    source: str = "default_workday"
+    reason: str = ""
+    matched_rule_count: int = 0
 
     @property
     def send_lunch(self) -> bool:

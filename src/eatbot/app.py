@@ -266,13 +266,21 @@ class EatBotApplication:
                 detail=f"date={target_date.isoformat()} {weekday}; {detail}",
             )
         if action == CronAction.LUNCH_STATS:
-            will_execute, detail = self._booking.preview_stats(meal=Meal.LUNCH, snapshot=snapshot)
+            will_execute, detail = self._booking.preview_stats(
+                target_date=target_date,
+                meal=Meal.LUNCH,
+                snapshot=snapshot,
+            )
             return CronActionPreview(
                 will_execute=will_execute,
                 detail=f"date={target_date.isoformat()} {weekday}; {detail}",
             )
         if action == CronAction.DINNER_STATS:
-            will_execute, detail = self._booking.preview_stats(meal=Meal.DINNER, snapshot=snapshot)
+            will_execute, detail = self._booking.preview_stats(
+                target_date=target_date,
+                meal=Meal.DINNER,
+                snapshot=snapshot,
+            )
             return CronActionPreview(
                 will_execute=will_execute,
                 detail=f"date={target_date.isoformat()} {weekday}; {detail}",

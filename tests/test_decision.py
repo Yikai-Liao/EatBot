@@ -14,12 +14,28 @@ def test_weekday_default_send_both_meals() -> None:
     decider = MealPlanDecider()
     plan = decider.decide(date(2026, 2, 12), rules=[])
     assert plan.meals == {Meal.LUNCH, Meal.DINNER}
+    assert plan.reason == "工作日"
 
 
 def test_weekend_default_send_none() -> None:
     decider = MealPlanDecider()
-    plan = decider.decide(date(2026, 2, 14), rules=[])
+    plan = decider.decide(date(2026, 11, 1), rules=[])
     assert plan.meals == set()
+    assert plan.reason == "周末休班"
+
+
+def test_statutory_holiday_default_send_none() -> None:
+    decider = MealPlanDecider()
+    plan = decider.decide(date(2026, 10, 1), rules=[])
+    assert plan.meals == set()
+    assert plan.reason == "法定节假日"
+
+
+def test_makeup_workday_default_send_both_meals() -> None:
+    decider = MealPlanDecider()
+    plan = decider.decide(date(2026, 5, 9), rules=[])
+    assert plan.meals == {Meal.LUNCH, Meal.DINNER}
+    assert plan.reason == "调休工作日"
 
 
 def test_matched_rule_overrides_default() -> None:
@@ -33,6 +49,7 @@ def test_matched_rule_overrides_default() -> None:
     ]
     plan = decider.decide(date(2026, 2, 14), rules=rules)
     assert plan.meals == {Meal.DINNER}
+    assert plan.source == "schedule_rule"
 
 
 def test_multiple_matched_rules_use_last_rule_meals() -> None:

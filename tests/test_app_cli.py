@@ -192,21 +192,21 @@ def test_dev_cron_preview(runner: CliRunner) -> None:
             snapshot = Mock(schedule_rules_count=3, enabled_user_count=5, stats_receiver_count=2)
             app.build_cron_preview_snapshot.return_value = snapshot
             app.preview_cron_action.side_effect = [
-                Mock(will_execute=False, detail="date=2026-02-14 周六; 规则结果=不发送"),
-                Mock(will_execute=True, detail="date=2026-02-14 周六; 餐次=午餐; 统计接收人=2"),
+                Mock(will_execute=False, detail="date=2026-11-01 周日; 规则结果=不发送"),
+                Mock(will_execute=False, detail="date=2026-11-01 周日; 餐次=午餐; 默认规则=周末休班"),
             ]
             mocked_load_config.return_value = build_runtime_config()
             mocked_bootstrap.return_value = app
 
             result = runner.invoke(
                 cli,
-                ["dev", "cron", "--from", "2026-02-14T09:00", "--to", "2026-02-14T10:30"],
+                ["dev", "cron", "--from", "2026-11-01T09:00", "--to", "2026-11-01T10:30"],
             )
 
     assert result.exit_code == 0, result.output
     assert "窗口任务数: 2" in result.output
     assert "daily_send_cards [跳过]" in result.output
-    assert "daily_lunch_stats [执行]" in result.output
+    assert "daily_lunch_stats [跳过]" in result.output
 
 
 def test_run_command_accepts_log_level_option(runner: CliRunner) -> None:
