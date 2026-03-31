@@ -10,6 +10,7 @@ from lark_oapi.card.model import Card
 from lark_oapi.core.const import UTF_8
 from lark_oapi.core.json import JSON
 from lark_oapi.ws.client import Client as BaseWsClient
+from lark_oapi.ws.client import DEVICE_ID, SERVICE_ID, _parse_ws_conn_exception, loop, parse_qs, urlparse, websockets
 from lark_oapi.ws.client import _get_by_key
 from lark_oapi.ws.const import (
     HEADER_BIZ_RT,
@@ -34,6 +35,34 @@ class WsClientPatched(BaseWsClient):
     ) -> None:
         super().__init__(app_id=app_id, app_secret=app_secret, **kwargs)
         self._card_frame_handler = card_frame_handler
+
+    async def _connect(self) -> None:
+        await self._lock.acquire()
+        if self._conn is not None:
+            self._lock.release()
+            return
+        try:
+            conn_url = self._get_conn_url()
+            parsed = urlparse(conn_url)
+            query = parse_qs(parsed.query)
+            conn_id = query[DEVICE_ID][0]
+            service_id = query[SERVICE_ID][0]
+
+            # Ignore host proxy settings for the Feishu long connection.
+            # The upstream client defaults to websocket proxy auto-discovery,
+            # which breaks in local SOCKS environments unless python-socks is installed.
+            conn = await websockets.connect(conn_url, proxy=None)
+            self._conn = conn
+            self._conn_url = conn_url
+            self._conn_id = conn_id
+            self._service_id = service_id
+
+            logger.info(self._fmt_log("connected to {}", conn_url))
+            loop.create_task(self._receive_message_loop())
+        except websockets.InvalidStatusCode as exc:
+            _parse_ws_conn_exception(exc)
+        finally:
+            self._lock.release()
 
     async def _handle_data_frame(self, frame):
         hs = frame.headers

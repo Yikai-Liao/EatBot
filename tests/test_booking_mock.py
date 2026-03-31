@@ -614,7 +614,7 @@ class TestBookingServiceMock:
         kwargs = self.im.delay_update_card.call_args.kwargs
         assert kwargs["token"] == "c_token_1"
         assert kwargs["card_payload"] is not None
-        assert kwargs["toast_content"] == "处理完成"
+        assert kwargs["toast_content"] == "预约已更新"
         self.im.patch_interactive.assert_not_called()
 
     def test_handle_card_action_rejects_when_user_is_processing_in_background(self) -> None:
@@ -704,7 +704,7 @@ class TestBookingServiceMock:
         kwargs = self.im.delay_update_card.call_args.kwargs
         assert kwargs["token"] == "c_token_1"
         assert kwargs["card_payload"] is not None
-        assert kwargs["toast_content"] == "处理完成"
+        assert kwargs["toast_content"] == "已刷新最新预约状态"
         self.im.patch_interactive.assert_not_called()
 
     def test_handle_card_action_with_token_only_context_keeps_card_update_via_callback_token(self) -> None:
@@ -758,7 +758,7 @@ class TestBookingServiceMock:
         kwargs = self.im.delay_update_card.call_args.kwargs
         assert kwargs["token"] == "c_token_2"
         assert kwargs["card_payload"] is not None
-        assert kwargs["toast_content"] == "处理完成"
+        assert kwargs["toast_content"] == "预约已更新"
         self.im.patch_interactive.assert_not_called()
 
     def test_handle_card_action_token_update_code_10002_falls_back_to_open_message_id_patch(self) -> None:
@@ -806,10 +806,77 @@ class TestBookingServiceMock:
         self.im.delay_update_card.assert_called_once()
         delay_kwargs = self.im.delay_update_card.call_args.kwargs
         assert delay_kwargs["token"] == "c_token_3"
-        assert delay_kwargs["toast_content"] == "处理完成"
+        assert delay_kwargs["toast_content"] == "预约已更新"
         self.im.patch_interactive.assert_called_once()
         patch_kwargs = self.im.patch_interactive.call_args.kwargs
         assert patch_kwargs["message_id"] == "om_3"
+
+    def test_handle_card_action_with_token_revalidates_schedule_before_background_write(self) -> None:
+        target_date = date(2026, 12, 31)
+        tasks: list = []
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(
+                start_date=target_date,
+                end_date=target_date,
+                meals={Meal.LUNCH},
+            )
+        ]
+        self.repo.list_user_meal_rows.side_effect = [
+            [make_meal_row(Meal.DINNER, reservation_status=True, record_id="rec_dinner_existing")],
+            [make_meal_row(Meal.DINNER, reservation_status=False, record_id="rec_dinner_existing")],
+        ]
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_4",
+                context=SimpleNamespace(open_message_id="om_4"),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["晚餐"],
+                        toggle_meal="晚餐",
+                        meal_record_ids={"午餐": None, "晚餐": "rec_dinner_existing"},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+
+        assert response.toast.type == "info"
+        assert response.toast.content == "处理中"
+        assert len(tasks) == 1
+        self.repo.cancel_meal_record.assert_not_called()
+
+        tasks[0]()
+
+        self.repo.cancel_meal_record.assert_called_once_with(
+            target_date=target_date,
+            open_id="ou_sender",
+            meal=Meal.DINNER,
+            record_id="rec_dinner_existing",
+            prefer_direct=True,
+        )
+        self.repo.upsert_meal_record.assert_not_called()
+        self.im.delay_update_card.assert_called_once()
+        kwargs = self.im.delay_update_card.call_args.kwargs
+        assert kwargs["token"] == "c_token_4"
+        assert "不可预约" in kwargs["toast_content"]
+        payload = kwargs["card_payload"]
+        meal_buttons = [
+            item for item in payload["body"]["elements"] if item.get("tag") == "button" and item["text"]["content"] in {"午餐", "晚餐"}
+        ]
+        assert [item["text"]["content"] for item in meal_buttons] == ["午餐"]
 
     def test_handle_card_action_with_token_blocks_after_cutoff_before_background(self) -> None:
         tasks: list = []

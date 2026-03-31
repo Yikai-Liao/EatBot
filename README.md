@@ -19,6 +19,7 @@
 - 卡片提供三个按钮：午餐、晚餐、刷新。
 - 点击按钮即切换对应餐次的选中状态，并立即回写记录与刷新卡片高亮状态。
 - 点击“刷新”会重新读取当日记录并同步按钮高亮，不会修改表格。
+- 对带回调上下文的卡片点击，会先快速返回“处理中”的可视化状态，后台再按最新配置与最新记录完成最终校验和回写。
 - 每次点击都会重新读取“用餐定时配置”与“用餐记录”，不信任旧卡片上的历史状态。
 - 默认推荐来源于“用餐人员配置”表中的“餐食偏好”。
 
@@ -177,14 +178,17 @@ max_size_mb = 20
 - CLI 已统一为 Typer 命令树：`run`、`check`、`send cards`、`send stats`、`send text`、`dev listen`、`dev cron`。
 - 日志体系已统一为 Loguru：命令行输出与文件持久化同时启用，支持文件大小轮转。
 - 测试框架已统一为 Pytest，覆盖配置加载、CLI 参数、核心业务规则与卡片处理。
+- 卡片回调已支持“先快速响应，再后台按最新规则与记录完成最终更新”的双阶段处理。
+- `dev listen` 长连接已显式忽略宿主机代理设置，避免在本地 SOCKS 环境里额外依赖 `python-socks`。
 
 ## 8. 技术实现
 - 事件接收：飞书长连接（WebSocket）模式。
 - `im.message.receive_v1`：使用 `asyncio` 协程调度异步处理，避免阻塞长连接主处理线程。
 - `application.bot.menu_v6`：使用 `asyncio` 协程调度异步处理，支持聊天栏“当日卡片”按钮主动发卡。
-- `card.action.trigger`：同步处理并在 3 秒内返回 `toast` / 更新后的卡片。
+- `card.action.trigger`：优先在 3 秒内返回 `toast` / “处理中”卡片，最终结果在后台重新读取最新规则与最新记录后异步更新。
 - 消息发送：飞书 IM 新版卡片（JSON `schema=2.0`）。
 - 数据访问：Bitable OpenAPI（records / fields）。
+- 长连接客户端会显式绕过本机代理配置，避免 WebSocket 自动走 SOCKS 代理时触发 `python-socks` 依赖问题。
 - 调度策略：进程内定时任务 + 截止时间判定。
 - 数据一致性：写入前按“日期+人员+餐食类型”幂等检查。
 - CLI/参数管理：Typer。
@@ -230,6 +234,7 @@ eatbot
 - `eatbot dev listen [--at YYYY-MM-DDTHH:MM[:SS]]`
 - 开发联调模式：仅启动长连接，不启动定时任务。
 - `--at` 用于注入虚拟当前时间（截止逻辑联调）。
+- 长连接会忽略宿主机代理配置，避免本地 SOCKS 代理影响飞书联调。
 
 - `eatbot dev cron --from YYYY-MM-DDTHH:MM[:SS] --to YYYY-MM-DDTHH:MM[:SS] [--execute]`
 - 定时器窗口验证命令。

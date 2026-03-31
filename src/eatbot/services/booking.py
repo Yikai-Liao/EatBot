@@ -673,10 +673,11 @@ class BookingService:
         action_name = str(action_value.get("action") or "")
         try:
             try:
-                latest_payload = self._process_action_by_record_ids(
+                level, content, latest_payload = self._process_action(
                     operator_open_id=operator_open_id,
-                    target_date=target_date,
                     action_value=action_value,
+                    form_value=form_value,
+                    source=f"{source}_async",
                 )
             except Exception:
                 logger.exception(
@@ -684,6 +685,8 @@ class BookingService:
                     operator_open_id,
                     action_name,
                 )
+                level = "error"
+                content = "预约更新失败，请稍后刷新重试"
                 latest_payload = None
 
             fallback_payload = self._build_optimistic_card_payload(
@@ -698,71 +701,11 @@ class BookingService:
                 card_payload=final_payload,
                 operator_open_id=operator_open_id,
                 target_date=target_date,
-                toast_content="处理完成",
+                toast_type=level,
+                toast_content=content,
             )
         finally:
             self._unmark_user_processing(operator_open_id)
-
-    def _process_action_by_record_ids(
-        self,
-        *,
-        operator_open_id: str,
-        target_date: date,
-        action_value: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        action_name = str(action_value.get("action") or "")
-        allowed = parse_meals(action_value.get("allowed_meals"))
-        if not allowed:
-            return None
-        defaults = parse_meals(action_value.get("default_meals")) & allowed
-        meal_prices = self._parse_meal_prices(action_value=action_value, allowed_meals=allowed)
-        selected_before = parse_meals(action_value.get("selected_meals")) & allowed
-        selected = set(selected_before)
-        meal_record_ids = self._parse_meal_record_ids(action_value=action_value, allowed_meals=allowed)
-
-        if action_name == "toggle_meal":
-            toggle = _parse_meal(action_value.get("toggle_meal"))
-            if toggle is not None and toggle in allowed:
-                if toggle in selected:
-                    selected.remove(toggle)
-                else:
-                    selected.add(toggle)
-            changed_meals = {meal for meal in allowed if (meal in selected_before) != (meal in selected)}
-            meal_record_ids = self._apply_selection(
-                target_date=target_date,
-                operator_open_id=operator_open_id,
-                changed_meals=changed_meals,
-                selected=selected,
-                meal_prices=meal_prices,
-                meal_record_ids=meal_record_ids,
-            )
-        elif action_name != "refresh_state":
-            return None
-
-        record_ids = [record_id for record_id in meal_record_ids.values() if record_id]
-        if record_ids:
-            rows = self._repository.list_user_meal_rows_by_record_ids(
-                target_date=target_date,
-                open_id=operator_open_id,
-                record_ids=record_ids,
-            )
-            if isinstance(rows, list) and rows:
-                selected, resolved_ids = self._resolve_selected_from_rows(rows=rows, allowed_meals=allowed)
-                meal_record_ids = {
-                    meal: resolved_ids.get(meal) or meal_record_ids.get(meal) for meal in allowed
-                }
-
-        return self._card_builder.build_payload(
-            target_date=target_date,
-            lunch_cutoff=self._config.schedule.lunch_cutoff,
-            dinner_cutoff=self._config.schedule.dinner_cutoff,
-            user_open_id=operator_open_id,
-            allowed_meals=allowed,
-            default_meals=defaults,
-            selected_meals=selected,
-            meal_prices=meal_prices,
-            meal_record_ids=meal_record_ids,
-        )
 
     def _push_async_card_update(
         self,
@@ -771,6 +714,7 @@ class BookingService:
         card_payload: dict[str, Any],
         operator_open_id: str,
         target_date: date,
+        toast_type: str = "info",
         toast_content: str | None = None,
     ) -> None:
         if callback_context.token:
@@ -778,6 +722,7 @@ class BookingService:
                 self._im.delay_update_card(
                     token=callback_context.token,
                     card_payload=card_payload,
+                    toast_type=toast_type,
                     toast_content=toast_content,
                 )
                 logger.info(

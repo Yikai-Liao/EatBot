@@ -439,13 +439,14 @@ class IMAdapter:
         *,
         token: str,
         card_payload: dict[str, Any] | None = None,
+        toast_type: str = "info",
         toast_content: str | None = None,
     ) -> None:
         body: dict[str, Any] = {"token": token}
         if card_payload is not None:
             body["card"] = card_payload
         if toast_content:
-            body["toast"] = {"type": "info", "content": toast_content}
+            body["toast"] = {"type": toast_type, "content": toast_content}
 
         request = (
             lark.BaseRequest.builder()
