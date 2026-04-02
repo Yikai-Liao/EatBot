@@ -228,6 +228,104 @@ class BitableRepository:
         )
         return created.record_id
 
+    def mark_meal_record_unreserved(
+        self,
+        *,
+        target_date: date,
+        open_id: str,
+        meal: Meal,
+        price: Decimal,
+        record_id: str | None = None,
+        prefer_direct: bool = False,
+    ) -> str:
+        started_at = mono_time.monotonic()
+        payload = self._meal_payload(
+            target_date=target_date,
+            open_id=open_id,
+            meal=meal,
+            price=price,
+            reservation_status=False,
+        )
+        update_payload = self._meal_update_payload(meal=meal, price=price, reservation_status=False)
+        table_id = self._table_id("meal_record")
+
+        if prefer_direct:
+            if record_id:
+                update_started = mono_time.monotonic()
+                try:
+                    self._bitable.update_record(table_id=table_id, record_id=record_id, fields=update_payload)
+                    logger.debug(
+                        "meal_record.mark_unreserved: mode=direct_update date={} meal={} cost={}ms",
+                        target_date.isoformat(),
+                        meal.value,
+                        int((mono_time.monotonic() - update_started) * 1000),
+                    )
+                    return record_id
+                except FeishuApiError:
+                    logger.warning(
+                        "meal_record.mark_unreserved: direct_update 失败, fallback=create date={} meal={}",
+                        target_date.isoformat(),
+                        meal.value,
+                    )
+            create_started = mono_time.monotonic()
+            created = self._bitable.create_record(table_id=table_id, fields=payload)
+            logger.debug(
+                "meal_record.mark_unreserved: mode=direct_create date={} meal={} write={}ms total={}ms",
+                target_date.isoformat(),
+                meal.value,
+                int((mono_time.monotonic() - create_started) * 1000),
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
+            return created.record_id
+
+        if record_id:
+            update_started = mono_time.monotonic()
+            try:
+                self._bitable.update_record(table_id=table_id, record_id=record_id, fields=payload)
+                logger.debug(
+                    "meal_record.mark_unreserved: mode=update_by_hint date={} meal={} write={}ms total={}ms",
+                    target_date.isoformat(),
+                    meal.value,
+                    int((mono_time.monotonic() - update_started) * 1000),
+                    int((mono_time.monotonic() - started_at) * 1000),
+                )
+                return record_id
+            except FeishuApiError:
+                logger.warning(
+                    "meal_record.mark_unreserved: update_by_hint 失败, fallback=scan date={} meal={}",
+                    target_date.isoformat(),
+                    meal.value,
+                )
+
+        scan_started = mono_time.monotonic()
+        rows = self._list_meal_rows(target_date=target_date, open_id=open_id)
+        scan_cost = int((mono_time.monotonic() - scan_started) * 1000)
+        match = next((row for row in rows if row.meal_type == meal), None)
+        if match:
+            write_started = mono_time.monotonic()
+            self._bitable.update_record(table_id=table_id, record_id=match.record_id, fields=payload)
+            logger.debug(
+                "meal_record.mark_unreserved: mode=scan_update date={} meal={} scan={}ms write={}ms total={}ms",
+                target_date.isoformat(),
+                meal.value,
+                scan_cost,
+                int((mono_time.monotonic() - write_started) * 1000),
+                int((mono_time.monotonic() - started_at) * 1000),
+            )
+            return match.record_id
+
+        write_started = mono_time.monotonic()
+        created = self._bitable.create_record(table_id=table_id, fields=payload)
+        logger.debug(
+            "meal_record.mark_unreserved: mode=scan_create date={} meal={} scan={}ms write={}ms total={}ms",
+            target_date.isoformat(),
+            meal.value,
+            scan_cost,
+            int((mono_time.monotonic() - write_started) * 1000),
+            int((mono_time.monotonic() - started_at) * 1000),
+        )
+        return created.record_id
+
     def cancel_meal_record(
         self,
         *,

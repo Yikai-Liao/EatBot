@@ -22,7 +22,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from eatbot.config import RuntimeConfig
-from eatbot.domain.cards import ReservationCardBuilder
+from eatbot.domain.cards import LeaveCardBuilder, ReservationCardBuilder
 from eatbot.domain.decision import MealPlanDecider, parse_meals
 from eatbot.domain.models import DailyMealPlan, Meal, MealScheduleRule, UserProfile
 from eatbot.services.repositories import BitableRepository, MealFeeArchiveRecord
@@ -79,10 +79,12 @@ class BookingService:
         self._repository = repository
         self._im = im
         self._card_builder = ReservationCardBuilder()
+        self._leave_card_builder = LeaveCardBuilder()
         self._decider = MealPlanDecider()
         self._timezone = ZoneInfo(config.timezone)
         self._now_provider = now_provider
         self._today_card_text_commands = frozenset(config.commands.today_card_texts)
+        self._leave_text_commands = frozenset(config.commands.leave_texts)
         self._help_text_commands = frozenset(config.commands.help_texts)
         self._payment_qr_text_commands = frozenset(config.commands.payment_qr_texts)
         self._today_card_menu_event_keys = frozenset(config.commands.today_card_menu_event_keys)
@@ -119,6 +121,15 @@ class BookingService:
             return
 
         self._send_card_to_user(user=user, target_date=today, allowed_meals=plan.meals)
+
+    def send_leave_card_to_user(self, open_id: str) -> None:
+        user = self._load_user(open_id)
+        if user is None:
+            self._im.send_text(open_id, self._USER_NOT_FOUND_TEXT)
+            return
+
+        card_json = self._leave_card_builder.build(user_open_id=user.open_id, target_date=self._now().date())
+        self._im.send_interactive(receive_id=user.open_id, card_json=card_json)
 
     def send_stats(self, target_date: date, meal: Meal) -> None:
         started_at = mono_time.monotonic()
@@ -468,6 +479,9 @@ class BookingService:
         if text in self._today_card_text_commands:
             self.send_card_to_user_today(sender_open_id)
             return
+        if text in self._leave_text_commands:
+            self.send_leave_card_to_user(sender_open_id)
+            return
         if text in self._payment_qr_text_commands:
             self._send_payment_qr_notice(open_id=sender_open_id, log_name="付款码")
             return
@@ -505,6 +519,9 @@ class BookingService:
                 operator_open_id=event.operator.open_id if event.operator else None,
                 action_value=event.action.value or {},
                 form_value=event.action.form_value or {},
+                action_tag=getattr(event.action, "tag", None),
+                action_option=getattr(event.action, "option", None),
+                action_input_value=getattr(event.action, "input_value", None),
                 source="event",
                 callback_context=callback_context,
             )
@@ -532,6 +549,9 @@ class BookingService:
                 operator_open_id=getattr(data, "open_id", None),
                 action_value=action.value or {},
                 form_value=action.form_value or {},
+                action_tag=getattr(action, "tag", None),
+                action_option=getattr(action, "option", None),
+                action_input_value=getattr(action, "input_value", None),
                 source="card",
                 callback_context=callback_context,
             )
@@ -593,15 +613,21 @@ class BookingService:
         operator_open_id: str | None,
         action_value: dict[str, Any],
         form_value: dict[str, Any],
+        action_tag: str | None,
+        action_option: str | None,
+        action_input_value: str | None,
         source: str,
         callback_context: CardCallbackUpdateContext | None,
     ) -> tuple[str | None, str | None, dict[str, Any] | None]:
         action_name = str(action_value.get("action") or "")
-        if callback_context is None or action_name not in {"toggle_meal", "refresh_state"}:
+        if callback_context is None or action_name not in {"toggle_meal", "refresh_state", "submit_leave_range"}:
             return self._process_action(
                 operator_open_id=operator_open_id,
                 action_value=action_value,
                 form_value=form_value,
+                action_tag=action_tag,
+                action_option=action_option,
+                action_input_value=action_input_value,
                 source=source,
             )
         if not operator_open_id:
@@ -639,6 +665,9 @@ class BookingService:
                     operator_open_id=operator_open_id,
                     action_value=action_value,
                     form_value=form_value,
+                    action_tag=action_tag,
+                    action_option=action_option,
+                    action_input_value=action_input_value,
                     source=source,
                 )
 
@@ -648,6 +677,9 @@ class BookingService:
                     target_date=target_date,
                     action_value=action_value,
                     form_value=form_value,
+                    action_tag=action_tag,
+                    action_option=action_option,
+                    action_input_value=action_input_value,
                     source=source,
                     callback_context=callback_context,
                     optimistic_card_payload=optimistic_card_payload,
@@ -666,6 +698,9 @@ class BookingService:
         target_date: date,
         action_value: dict[str, Any],
         form_value: dict[str, Any],
+        action_tag: str | None,
+        action_option: str | None,
+        action_input_value: str | None,
         source: str,
         callback_context: CardCallbackUpdateContext,
         optimistic_card_payload: dict[str, Any],
@@ -677,6 +712,9 @@ class BookingService:
                     operator_open_id=operator_open_id,
                     action_value=action_value,
                     form_value=form_value,
+                    action_tag=action_tag,
+                    action_option=action_option,
+                    action_input_value=action_input_value,
                     source=f"{source}_async",
                 )
             except Exception:
@@ -782,6 +820,15 @@ class BookingService:
         refresh_syncing: bool = False,
     ) -> dict[str, Any] | None:
         action_name = str(action_value.get("action") or "")
+        if action_name == "submit_leave_range":
+            return self._leave_card_builder.build_payload(
+                user_open_id=target_open_id,
+                target_date=target_date,
+                selected_start_date=_parse_iso_date(str(action_value.get("selected_start_date") or "")) or target_date,
+                selected_end_date=_parse_iso_date(str(action_value.get("selected_end_date") or "")) or target_date,
+                readonly=refresh_syncing,
+                submit_syncing=refresh_syncing,
+            )
         if action_name not in {"toggle_meal", "refresh_state"}:
             return None
 
@@ -872,6 +919,9 @@ class BookingService:
         operator_open_id: str | None,
         action_value: dict[str, Any],
         form_value: dict[str, Any],
+        action_tag: str | None,
+        action_option: str | None,
+        action_input_value: str | None,
         source: str,
         enforce_cutoff: bool = True,
     ) -> tuple[str, str, dict[str, Any] | None]:
@@ -908,6 +958,78 @@ class BookingService:
             user = self._load_user(operator_open_id)
             if user is None:
                 return ("error", self._USER_NOT_FOUND_TEXT, None)
+
+            if action_name in {"select_leave_start", "select_leave_end"}:
+                selected_date = _parse_card_picker_date(str(action_option or action_input_value or ""))
+                if selected_date is None:
+                    logger.warning(
+                        "请假日期选择回调缺少日期: source={} action={} tag={} option={} input={} payload={}",
+                        source,
+                        action_name,
+                        action_tag or "",
+                        action_option or "",
+                        action_input_value or "",
+                        action_value,
+                    )
+                    return ("error", "日期选择失败，请重试", None)
+
+                current_start = _parse_iso_date(str(action_value.get("selected_start_date") or ""))
+                current_end = _parse_iso_date(str(action_value.get("selected_end_date") or ""))
+                if action_name == "select_leave_start":
+                    current_start = selected_date
+                else:
+                    current_end = selected_date
+
+                fallback_date = selected_date
+                card_payload = self._leave_card_builder.build_payload(
+                    user_open_id=operator_open_id,
+                    target_date=target_date,
+                    selected_start_date=current_start or fallback_date,
+                    selected_end_date=current_end or fallback_date,
+                    submit_syncing=False,
+                )
+                _mark("parse_and_validate")
+                _mark("apply_selection")
+                _mark("build_card")
+                return ("info", "日期已更新", card_payload)
+
+            if action_name == "submit_leave_range":
+                start_date = _parse_iso_date(str(action_value.get("selected_start_date") or ""))
+                end_date = _parse_iso_date(str(action_value.get("selected_end_date") or ""))
+                logger.info(
+                    "处理请假提交: source={} start={} end={} tag={} option={} form_keys={} payload={}",
+                    source,
+                    start_date.isoformat() if start_date else "",
+                    end_date.isoformat() if end_date else "",
+                    action_tag or "",
+                    action_option or "",
+                    sorted(form_value.keys()),
+                    action_value,
+                )
+                if start_date is None or end_date is None:
+                    return ("error", "请先选择开始日期和结束日期", None)
+                if end_date < start_date:
+                    return ("error", "结束日期不能早于开始日期", None)
+
+                self._apply_leave_range(user=user, start_date=start_date, end_date=end_date)
+                self._send_leave_success_notice(
+                    open_id=operator_open_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                _mark("parse_and_validate")
+                _mark("apply_selection")
+                card_payload = self._leave_card_builder.build_payload(
+                    user_open_id=operator_open_id,
+                    target_date=start_date,
+                    selected_start_date=start_date,
+                    selected_end_date=end_date,
+                    readonly=True,
+                    submitted=True,
+                    submit_syncing=False,
+                )
+                _mark("build_card")
+                return ("info", "请假已设置", card_payload)
 
             allowed = self._allowed_meals_for_date(target_date)
             defaults = user.meal_preferences & allowed
@@ -1092,6 +1214,54 @@ class BookingService:
             total_cost,
         )
         return updated_record_ids
+
+    def _apply_leave_range(
+        self,
+        *,
+        user: UserProfile,
+        start_date: date,
+        end_date: date,
+    ) -> None:
+        # start_date/end_date are treated as an inclusive range.
+        target_date = start_date
+        while target_date <= end_date:
+            allowed_meals = self._allowed_meals_for_date(target_date)
+            if not allowed_meals:
+                target_date += timedelta(days=1)
+                continue
+
+            meal_prices = self._build_meal_prices(user=user, allowed_meals=allowed_meals)
+            rows = self._repository.list_user_meal_rows(target_date=target_date, open_id=user.open_id)
+            rows = self._sync_disallowed_meal_rows(
+                target_date=target_date,
+                open_id=user.open_id,
+                allowed_meals=allowed_meals,
+                rows=rows,
+            )
+            _, meal_record_ids = self._resolve_selected_from_rows(rows=rows, allowed_meals=allowed_meals)
+
+            for meal in allowed_meals:
+                price = meal_prices.get(meal)
+                if price is None:
+                    raise ValueError(f"{meal.value} 单价缺失")
+                record_id = self._repository.mark_meal_record_unreserved(
+                    target_date=target_date,
+                    open_id=user.open_id,
+                    meal=meal,
+                    price=price,
+                    record_id=meal_record_ids.get(meal),
+                    prefer_direct=True,
+                )
+                meal_record_ids[meal] = record_id
+
+            target_date += timedelta(days=1)
+
+    def _send_leave_success_notice(self, *, open_id: str, start_date: date, end_date: date) -> None:
+        text = (
+            f"请假成功，已自动暂停 {start_date.isoformat()} 到 {end_date.isoformat()} 的食堂自动预约，"
+            "但仍可通过点击当日卡片重新预约食堂。"
+        )
+        self._send_text_notice(open_id=open_id, text=text, log_name="请假成功通知")
 
     def _resolve_selected_from_records(
         self,
@@ -1369,6 +1539,28 @@ def _parse_iso_date(value: str) -> date | None:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def _parse_card_picker_date(value: str) -> date | None:
+    if not value:
+        return None
+
+    normalized = value.strip()
+    direct = _parse_iso_date(normalized)
+    if direct is not None:
+        return direct
+
+    head = normalized.split(" ", 1)[0].strip()
+    direct = _parse_iso_date(head)
+    if direct is not None:
+        return direct
+
+    for pattern in ("%Y-%m-%d %z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S %z"):
+        try:
+            return datetime.strptime(normalized, pattern).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _parse_meal(value: object) -> Meal | None:

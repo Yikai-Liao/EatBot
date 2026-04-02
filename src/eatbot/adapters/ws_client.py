@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import http
+import json
 import time
 from typing import Any, Callable
 
@@ -117,12 +118,15 @@ class WsClientPatched(BaseWsClient):
             if result is not None:
                 resp.data = base64.b64encode(JSON.marshal(result).encode(UTF_8))
         except Exception as exc:
+            payload_summary = self._summarize_card_action_payload(pl)
             logger.error(
                 self._fmt_log(
-                    "handle message failed, message_type: {}, message_id: {}, trace_id: {}, err: {}",
+                    "handle message failed, message_type: {}, message_id: {}, trace_id: {}, summary: {}, payload: {}, err: {}",
                     message_type.value,
                     msg_id,
                     trace_id,
+                    payload_summary,
+                    self._truncate_payload_for_log(pl),
                     exc,
                 )
             )
@@ -130,3 +134,38 @@ class WsClientPatched(BaseWsClient):
 
         frame.payload = JSON.marshal(resp).encode(UTF_8)
         await self._write_message(frame.SerializeToString())
+
+    @staticmethod
+    def _summarize_card_action_payload(payload: bytes) -> str:
+        try:
+            data = json.loads(payload.decode(UTF_8))
+        except Exception:
+            return "unparseable"
+
+        header = data.get("header")
+        event = data.get("event")
+        action = event.get("action") if isinstance(event, dict) else None
+        if not isinstance(action, dict):
+            return "non_card_action_event"
+
+        event_type = header.get("event_type") if isinstance(header, dict) else data.get("type")
+        value = action.get("value")
+        form_value = action.get("form_value")
+        form_keys = sorted(str(key) for key in form_value.keys()) if isinstance(form_value, dict) else []
+        return (
+            f"event_type={event_type or ''},"
+            f" tag={action.get('tag') or ''},"
+            f" name={action.get('name') or ''},"
+            f" value_type={type(value).__name__},"
+            f" form_keys={form_keys}"
+        )
+
+    @staticmethod
+    def _truncate_payload_for_log(payload: bytes, limit: int = 600) -> str:
+        try:
+            text = payload.decode(UTF_8)
+        except Exception:
+            return "<binary>"
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "...(truncated)"

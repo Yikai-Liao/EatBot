@@ -293,6 +293,17 @@ class TestBookingServiceMock:
             mocked.assert_not_called()
             self.im.send_text.assert_called_once_with("ou_sender", self.service._config.help_doc)
 
+    def test_handle_message_event_leave_command_sends_leave_card(self) -> None:
+        with patch.object(self.service, "send_leave_card_to_user") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    message=SimpleNamespace(message_type="text", content='{"text":"请假"}'),
+                    sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_message_event(data)
+            mocked.assert_called_once_with("ou_sender")
+
     def test_handle_message_event_payment_qr_command_sends_payment_qr(self) -> None:
         with patch.object(self.service, "_send_payment_qr_notice") as mocked:
             data = SimpleNamespace(
@@ -934,6 +945,174 @@ class TestBookingServiceMock:
 
         assert response.toast.type == "error"
         assert response.toast.content == "仅允许本人提交预约"
+
+    def test_send_leave_card_to_user_sends_interactive_card(self) -> None:
+        self.service.send_leave_card_to_user("ou_sender")
+
+        self.im.send_interactive.assert_called_once()
+        payload = json.loads(self.im.send_interactive.call_args.kwargs["card_json"])
+        assert payload["header"]["title"]["content"] == "请假暂停自动预约"
+
+    def test_handle_card_action_submit_leave_range_marks_range_unreserved(self) -> None:
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(
+                start_date=date(2026, 12, 31),
+                end_date=date(2027, 1, 1),
+                meals={Meal.LUNCH},
+            )
+        ]
+        self.repo.list_user_meal_rows.side_effect = [
+            [make_meal_row(Meal.LUNCH, reservation_status=True, record_id="rec_1231_lunch")],
+            [],
+        ]
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                action=SimpleNamespace(
+                    value={
+                        "action": "submit_leave_range",
+                        "target_date": "2026-12-31",
+                        "target_open_id": "ou_sender",
+                        "selected_start_date": "2026-12-31",
+                        "selected_end_date": "2027-01-01",
+                    },
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = self.service.handle_card_action(data)
+
+        self.repo.mark_meal_record_unreserved.assert_has_calls(
+            [
+                call(
+                    target_date=date(2026, 12, 31),
+                    open_id="ou_sender",
+                    meal=Meal.LUNCH,
+                    price=Decimal("20"),
+                    record_id="rec_1231_lunch",
+                    prefer_direct=True,
+                ),
+                call(
+                    target_date=date(2027, 1, 1),
+                    open_id="ou_sender",
+                    meal=Meal.LUNCH,
+                    price=Decimal("20"),
+                    record_id=None,
+                    prefer_direct=True,
+                ),
+            ]
+        )
+        assert response.toast.type == "info"
+        assert response.toast.content == "请假已设置"
+        assert response.card.type == "raw"
+        submitted_payload = response.card.data
+        assert [item for item in submitted_payload["body"]["elements"] if item.get("tag") == "date_picker"] == []
+        submitted_button = next(item for item in submitted_payload["body"]["elements"] if item.get("tag") == "button")
+        assert submitted_button["text"]["content"] == "已提交"
+        assert submitted_button["disabled"] is True
+        self.im.send_text.assert_called_once_with(
+            "ou_sender",
+            "请假成功，已自动暂停 2026-12-31 到 2027-01-01 的食堂自动预约，但仍可通过点击当日卡片重新预约食堂。",
+        )
+
+    def test_handle_card_action_submit_leave_range_with_token_runs_in_background(self) -> None:
+        tasks: list = []
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(
+                start_date=date(2026, 12, 31),
+                end_date=date(2026, 12, 31),
+                meals={Meal.LUNCH, Meal.DINNER},
+            )
+        ]
+        self.repo.list_user_meal_rows.return_value = []
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_leave",
+                context=SimpleNamespace(open_message_id="om_leave"),
+                action=SimpleNamespace(
+                    value={
+                        "action": "submit_leave_range",
+                        "target_date": "2026-12-31",
+                        "target_open_id": "ou_sender",
+                        "selected_start_date": "2026-12-31",
+                        "selected_end_date": "2026-12-31",
+                    },
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+
+        assert response.toast.type == "info"
+        assert response.toast.content == "处理中"
+        assert response.card.type == "raw"
+        optimistic_payload = response.card.data
+        assert [item for item in optimistic_payload["body"]["elements"] if item.get("tag") == "date_picker"] == []
+        submit_button = next(
+            item for item in optimistic_payload["body"]["elements"] if item.get("tag") == "button"
+        )
+        assert submit_button["text"]["content"] == "后台处理中"
+        assert submit_button["disabled"] is True
+        assert len(tasks) == 1
+
+        tasks[0]()
+
+        self.im.delay_update_card.assert_called_once()
+        kwargs = self.im.delay_update_card.call_args.kwargs
+        assert kwargs["token"] == "c_token_leave"
+        assert kwargs["toast_content"] == "请假已设置"
+        final_payload = kwargs["card_payload"]
+        assert [item for item in final_payload["body"]["elements"] if item.get("tag") == "date_picker"] == []
+        final_button = next(item for item in final_payload["body"]["elements"] if item.get("tag") == "button")
+        assert final_button["text"]["content"] == "已提交"
+        assert final_button["disabled"] is True
+        self.im.send_text.assert_called_once_with(
+            "ou_sender",
+            "请假成功，已自动暂停 2026-12-31 到 2026-12-31 的食堂自动预约，但仍可通过点击当日卡片重新预约食堂。",
+        )
+
+    def test_handle_card_action_select_leave_start_updates_card_state(self) -> None:
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                action=SimpleNamespace(
+                    value={
+                        "action": "select_leave_start",
+                        "target_date": "2026-12-31",
+                        "target_open_id": "ou_sender",
+                        "selected_start_date": "2026-12-31",
+                        "selected_end_date": "2027-01-01",
+                    },
+                    form_value={},
+                    tag="date_picker",
+                    option="2027-01-05 +0800",
+                    input_value=None,
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = self.service.handle_card_action(data)
+
+        assert response.toast.type == "info"
+        assert response.toast.content == "日期已更新"
+        assert response.card.type == "raw"
+        payload = response.card.data
+        date_pickers = [item for item in payload["body"]["elements"] if item.get("tag") == "date_picker"]
+        assert [item["initial_date"] for item in date_pickers] == ["2027-01-05", "2027-01-01"]
+        submit_button = next(item for item in payload["body"]["elements"] if item.get("tag") == "button")
+        submit_value = submit_button["behaviors"][0]["value"]
+        assert submit_value["selected_start_date"] == "2027-01-05"
+        assert submit_value["selected_end_date"] == "2027-01-01"
+        self.repo.mark_meal_record_unreserved.assert_not_called()
         self.repo.upsert_meal_record.assert_not_called()
         self.repo.cancel_meal_record.assert_not_called()
 

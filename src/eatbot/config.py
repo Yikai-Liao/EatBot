@@ -167,6 +167,7 @@ class LoggingConfig(BaseModel):
 
 class CommandsConfig(BaseModel):
     today_card_texts: list[str] = Field(default_factory=lambda: ["订餐", "/eatbot today", "当日卡片", "卡片"])
+    leave_texts: list[str] = Field(default_factory=lambda: ["请假"])
     help_texts: list[str] = Field(default_factory=lambda: ["帮助"])
     payment_qr_texts: list[str] = Field(default_factory=lambda: ["付款码"])
     today_card_menu_event_keys: list[str] = Field(default_factory=lambda: ["当日卡片"])
@@ -174,6 +175,7 @@ class CommandsConfig(BaseModel):
 
     @field_validator(
         "today_card_texts",
+        "leave_texts",
         "help_texts",
         "payment_qr_texts",
         "today_card_menu_event_keys",

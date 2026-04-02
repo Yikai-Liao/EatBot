@@ -97,6 +97,151 @@ class ReservationCardBuilder:
         return sorted(meals, key=lambda item: self._MEAL_ORDER.get(item, 999))
 
 
+class LeaveCardBuilder:
+    def build(
+        self,
+        *,
+        user_open_id: str,
+        target_date: date,
+        selected_start_date: date | None = None,
+        selected_end_date: date | None = None,
+        readonly: bool = False,
+        submitted: bool = False,
+        submit_syncing: bool = False,
+    ) -> str:
+        return json.dumps(
+            self.build_payload(
+                user_open_id=user_open_id,
+                target_date=target_date,
+                selected_start_date=selected_start_date,
+                selected_end_date=selected_end_date,
+                readonly=readonly,
+                submitted=submitted,
+                submit_syncing=submit_syncing,
+            ),
+            ensure_ascii=False,
+        )
+
+    def build_payload(
+        self,
+        *,
+        user_open_id: str,
+        target_date: date,
+        selected_start_date: date | None = None,
+        selected_end_date: date | None = None,
+        readonly: bool = False,
+        submitted: bool = False,
+        submit_syncing: bool = False,
+    ) -> dict[str, Any]:
+        readonly = readonly or submit_syncing or submitted
+        start_date = selected_start_date or target_date
+        end_date = selected_end_date or target_date
+        submit_action_value = {
+            "action": "submit_leave_range",
+            "target_open_id": user_open_id,
+            "target_date": target_date.isoformat(),
+            "selected_start_date": start_date.isoformat(),
+            "selected_end_date": end_date.isoformat(),
+        }
+        start_picker_value = {
+            "action": "select_leave_start",
+            "target_open_id": user_open_id,
+            "target_date": target_date.isoformat(),
+            "selected_start_date": start_date.isoformat(),
+            "selected_end_date": end_date.isoformat(),
+        }
+        end_picker_value = {
+            "action": "select_leave_end",
+            "target_open_id": user_open_id,
+            "target_date": target_date.isoformat(),
+            "selected_start_date": start_date.isoformat(),
+            "selected_end_date": end_date.isoformat(),
+        }
+
+        elements: list[dict[str, Any]] = [
+            {
+                "tag": "markdown",
+                "content": "选择暂停自动预约的开始日期和结束日期。你仍可在当日卡片中手动点击恢复预约。",
+            },
+        ]
+
+        if readonly:
+            elements.extend(
+                [
+                    {
+                        "tag": "markdown",
+                        "content": f"开始日期：{start_date.isoformat()}",
+                    },
+                    {
+                        "tag": "markdown",
+                        "content": f"结束日期：{end_date.isoformat()}",
+                    },
+                ]
+            )
+        else:
+            elements.extend(
+                [
+                    {
+                        "tag": "markdown",
+                        "content": "开始日期",
+                    },
+                    {
+                        "tag": "date_picker",
+                        "initial_date": start_date.isoformat(),
+                        "placeholder": {"tag": "plain_text", "content": "请选择开始日期"},
+                        "value": start_picker_value,
+                    },
+                    {
+                        "tag": "markdown",
+                        "content": "结束日期",
+                    },
+                    {
+                        "tag": "date_picker",
+                        "initial_date": end_date.isoformat(),
+                        "placeholder": {"tag": "plain_text", "content": "请选择结束日期"},
+                        "value": end_picker_value,
+                    },
+                ]
+            )
+
+        if readonly:
+            button_text = "已提交" if submitted else "后台处理中"
+            elements.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": button_text},
+                    "type": "default",
+                    "disabled": True,
+                }
+            )
+        else:
+            elements.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "后台处理中" if submit_syncing else "提交"},
+                    "type": "primary",
+                    "behaviors": [{"type": "callback", "value": submit_action_value}],
+                }
+            )
+
+        return {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "header": {
+                "template": "wathet",
+                "title": {
+                    "tag": "plain_text",
+                    "content": "请假暂停自动预约",
+                },
+            },
+            "body": {
+                "direction": "vertical",
+                "padding": "12px 12px 12px 12px",
+                "elements": elements,
+            },
+        }
+
+
 def _build_toggle_buttons(
     *,
     target_date: date,

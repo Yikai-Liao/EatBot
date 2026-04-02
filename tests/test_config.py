@@ -89,6 +89,7 @@ def test_load_custom_commands_config() -> None:
 
         [commands]
         today_card_texts = ["点餐", "卡片"]
+        leave_texts = ["休息"]
         help_texts = ["说明"]
         payment_qr_texts = ["收款码"]
         today_card_menu_event_keys = ["今日卡片"]
@@ -147,6 +148,7 @@ def test_load_custom_commands_config() -> None:
 
         config = load_runtime_config(shared_file, local_file)
         assert config.commands.today_card_texts == ["点餐", "卡片"]
+        assert config.commands.leave_texts == ["休息"]
         assert config.commands.help_texts == ["说明"]
         assert config.commands.payment_qr_texts == ["收款码"]
         assert config.commands.today_card_menu_event_keys == ["今日卡片"]
