@@ -14,6 +14,7 @@ leave_texts = ["请假"]
 help_texts = ["帮助"]
 payment_qr_texts = ["付款码"]
 today_card_menu_event_keys = ["当日卡片"]
+leave_menu_event_keys = ["请假"]
 payment_qr_image_path = "assets/付款码.jpeg"
 
 # 业务时区（表格日期解析、定时任务、统计口径统一按此时区）

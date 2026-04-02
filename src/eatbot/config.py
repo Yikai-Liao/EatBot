@@ -171,6 +171,7 @@ class CommandsConfig(BaseModel):
     help_texts: list[str] = Field(default_factory=lambda: ["帮助"])
     payment_qr_texts: list[str] = Field(default_factory=lambda: ["付款码"])
     today_card_menu_event_keys: list[str] = Field(default_factory=lambda: ["当日卡片"])
+    leave_menu_event_keys: list[str] = Field(default_factory=lambda: ["请假"])
     payment_qr_image_path: str = "assets/付款码.jpeg"
 
     @field_validator(
@@ -179,6 +180,7 @@ class CommandsConfig(BaseModel):
         "help_texts",
         "payment_qr_texts",
         "today_card_menu_event_keys",
+        "leave_menu_event_keys",
     )
     @classmethod
     def validate_command_list(cls, value: list[str]) -> list[str]:

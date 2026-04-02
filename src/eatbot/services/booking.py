@@ -88,6 +88,7 @@ class BookingService:
         self._help_text_commands = frozenset(config.commands.help_texts)
         self._payment_qr_text_commands = frozenset(config.commands.payment_qr_texts)
         self._today_card_menu_event_keys = frozenset(config.commands.today_card_menu_event_keys)
+        self._leave_menu_event_keys = frozenset(config.commands.leave_menu_event_keys)
         self._payment_qr_image_path = self._resolve_project_path(config.commands.payment_qr_image_path)
         self._card_action_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="eatbot-card-action")
         self._background_runner = background_runner or self._default_background_runner
@@ -499,10 +500,24 @@ class BookingService:
         event_key = str(event.event_key).strip() if event and event.event_key is not None else ""
 
         if not operator_open_id:
+            logger.warning("机器人菜单事件缺少操作者 open_id: event_key={}", event_key)
             return
-        if event_key not in self._today_card_menu_event_keys:
+        logger.info("收到机器人菜单事件: operator={} event_key={}", operator_open_id, event_key)
+        if event_key in self._today_card_menu_event_keys:
+            logger.info("命中当日卡片菜单事件: operator={} event_key={}", operator_open_id, event_key)
+            self.send_card_to_user_today(operator_open_id)
             return
-        self.send_card_to_user_today(operator_open_id)
+        if event_key in self._leave_menu_event_keys:
+            logger.info("命中请假菜单事件: operator={} event_key={}", operator_open_id, event_key)
+            self.send_leave_card_to_user(operator_open_id)
+            return
+        logger.warning(
+            "忽略未知机器人菜单事件: operator={} event_key={} today_keys={} leave_keys={}",
+            operator_open_id,
+            event_key,
+            sorted(self._today_card_menu_event_keys),
+            sorted(self._leave_menu_event_keys),
+        )
 
     def handle_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         started_at = mono_time.monotonic()

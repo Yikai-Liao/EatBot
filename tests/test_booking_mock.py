@@ -340,6 +340,17 @@ class TestBookingServiceMock:
             self.service.handle_bot_menu_event(data)
             mocked.assert_called_once_with("ou_sender")
 
+    def test_handle_bot_menu_event_triggers_leave_card(self) -> None:
+        with patch.object(self.service, "send_leave_card_to_user") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    event_key="请假",
+                    operator=SimpleNamespace(operator_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            self.service.handle_bot_menu_event(data)
+            mocked.assert_called_once_with("ou_sender")
+
     def test_handle_bot_menu_event_ignores_unknown_event_key(self) -> None:
         with patch.object(self.service, "send_card_to_user_today") as mocked:
             data = SimpleNamespace(

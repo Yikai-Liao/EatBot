@@ -79,6 +79,7 @@ def test_load_and_merge_shared_local() -> None:
         assert config.logging.file_path == "logs/eatbot.log"
         assert config.logging.max_size_mb == 20
         assert config.commands.payment_qr_texts == ["付款码"]
+        assert config.commands.leave_menu_event_keys == ["请假"]
         assert config.commands.payment_qr_image_path == "assets/付款码.jpeg"
 
 
@@ -93,6 +94,7 @@ def test_load_custom_commands_config() -> None:
         help_texts = ["说明"]
         payment_qr_texts = ["收款码"]
         today_card_menu_event_keys = ["今日卡片"]
+        leave_menu_event_keys = ["我要请假"]
         payment_qr_image_path = "private/付款码.jpeg"
 
         [tables]
@@ -152,6 +154,7 @@ def test_load_custom_commands_config() -> None:
         assert config.commands.help_texts == ["说明"]
         assert config.commands.payment_qr_texts == ["收款码"]
         assert config.commands.today_card_menu_event_keys == ["今日卡片"]
+        assert config.commands.leave_menu_event_keys == ["我要请假"]
         assert config.commands.payment_qr_image_path == "private/付款码.jpeg"
 
 
