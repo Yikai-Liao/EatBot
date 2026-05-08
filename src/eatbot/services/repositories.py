@@ -14,6 +14,14 @@ from eatbot.config import RuntimeConfig
 from eatbot.domain.decision import parse_meals
 from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
 
+
+@dataclass(slots=True, frozen=True)
+class CancelMealResult:
+    status: str
+    record_id: str | None = None
+    error_message: str | None = None
+
+
 @dataclass(slots=True)
 class MealRecordRow:
     record_id: str
@@ -334,8 +342,12 @@ class BitableRepository:
         meal: Meal,
         record_id: str | None = None,
         prefer_direct: bool = False,
-    ) -> str | None:
+    ) -> CancelMealResult:
         started_at = mono_time.monotonic()
+        table_id = self._table_id("meal_record")
+        payload = self._meal_update_payload(reservation_status=False)
+        direct_error: FeishuApiError | None = None
+
         if prefer_direct:
             if not record_id:
                 logger.debug(
@@ -344,41 +356,74 @@ class BitableRepository:
                     meal.value,
                     int((mono_time.monotonic() - started_at) * 1000),
                 )
-                return None
-            payload = self._meal_update_payload(reservation_status=False)
+                return CancelMealResult(status="not_found")
             write_started = mono_time.monotonic()
             try:
                 self._bitable.update_record(
-                    table_id=self._table_id("meal_record"),
+                    table_id=table_id,
                     record_id=record_id,
                     fields=payload,
                 )
-            except FeishuApiError:
-                logger.warning(
-                    "meal_record.cancel: direct_update 失败, record_id={} date={} meal={}",
-                    record_id,
+                logger.debug(
+                    "meal_record.cancel: mode=direct_update date={} meal={} write={}ms total={}ms",
                     target_date.isoformat(),
                     meal.value,
+                    int((mono_time.monotonic() - write_started) * 1000),
+                    int((mono_time.monotonic() - started_at) * 1000),
                 )
-                return None
-            logger.debug(
-                "meal_record.cancel: mode=direct_update date={} meal={} write={}ms total={}ms",
-                target_date.isoformat(),
-                meal.value,
-                int((mono_time.monotonic() - write_started) * 1000),
-                int((mono_time.monotonic() - started_at) * 1000),
-            )
-            return record_id
+                return CancelMealResult(status="cancelled", record_id=record_id)
+            except FeishuApiError as exc:
+                direct_error = exc
+                logger.error(
+                    "meal_record.cancel: direct_update 失败, fallback=scan open_id={} date={} meal={} record_id={} error={}",
+                    open_id,
+                    target_date.isoformat(),
+                    meal.value,
+                    record_id,
+                    str(exc),
+                )
 
         scan_started = mono_time.monotonic()
-        rows = self._list_meal_rows(target_date=target_date, open_id=open_id)
+        try:
+            rows = self._list_meal_rows(target_date=target_date, open_id=open_id)
+        except FeishuApiError as exc:
+            error_message = str(exc)
+            logger.error(
+                "meal_record.cancel: fallback_scan 失败, open_id={} date={} meal={} record_id={} direct_error={} error={}",
+                open_id,
+                target_date.isoformat(),
+                meal.value,
+                record_id or "",
+                str(direct_error) if direct_error else "",
+                error_message,
+            )
+            return CancelMealResult(status="failed", record_id=record_id, error_message=error_message)
+
         scan_cost = int((mono_time.monotonic() - scan_started) * 1000)
         match = next((row for row in rows if row.meal_type == meal), None)
-        if not match and record_id:
+        if not match and not direct_error and record_id:
             match = next((row for row in rows if row.record_id == record_id), None)
 
-        payload = self._meal_update_payload(reservation_status=False)
         if match is None:
+            if direct_error:
+                error_message = str(direct_error)
+                logger.error(
+                    "meal_record.cancel: fallback_not_found, open_id={} date={} meal={} record_id={} rows={} error={}",
+                    open_id,
+                    target_date.isoformat(),
+                    meal.value,
+                    record_id or "",
+                    [
+                        {
+                            "record_id": row.record_id,
+                            "meal": row.meal_type.value if row.meal_type else None,
+                            "reservation_status": row.reservation_status,
+                        }
+                        for row in rows
+                    ],
+                    error_message,
+                )
+                return CancelMealResult(status="failed", record_id=record_id, error_message=error_message)
             if not record_id:
                 logger.debug(
                     "meal_record.cancel: mode=scan_skip date={} meal={} scan={}ms total={}ms",
@@ -387,22 +432,26 @@ class BitableRepository:
                     scan_cost,
                     int((mono_time.monotonic() - started_at) * 1000),
                 )
-                return None
+                return CancelMealResult(status="not_found")
             write_started = mono_time.monotonic()
             try:
                 self._bitable.update_record(
-                    table_id=self._table_id("meal_record"),
+                    table_id=table_id,
                     record_id=record_id,
                     fields=payload,
                 )
-            except FeishuApiError:
-                logger.warning(
-                    "meal_record.cancel: scan_fallback_update 失败, record_id={} date={} meal={}",
+            except FeishuApiError as exc:
+                error_message = str(exc)
+                logger.error(
+                    "meal_record.cancel: scan_fallback_update 失败, open_id={} record_id={} fallback_record_id={} date={} meal={} error={}",
+                    open_id,
                     record_id,
+                    "",
                     target_date.isoformat(),
                     meal.value,
+                    error_message,
                 )
-                return None
+                return CancelMealResult(status="failed", record_id=record_id, error_message=error_message)
             logger.debug(
                 "meal_record.cancel: mode=scan_fallback_update date={} meal={} scan={}ms write={}ms total={}ms",
                 target_date.isoformat(),
@@ -411,15 +460,29 @@ class BitableRepository:
                 int((mono_time.monotonic() - write_started) * 1000),
                 int((mono_time.monotonic() - started_at) * 1000),
             )
-            return record_id
+            return CancelMealResult(status="cancelled", record_id=record_id)
 
-        target_record_id = record_id or match.record_id
+        target_record_id = match.record_id
         write_started = mono_time.monotonic()
-        self._bitable.update_record(
-            table_id=self._table_id("meal_record"),
-            record_id=target_record_id,
-            fields=payload,
-        )
+        try:
+            self._bitable.update_record(
+                table_id=table_id,
+                record_id=target_record_id,
+                fields=payload,
+            )
+        except FeishuApiError as exc:
+            error_message = str(exc)
+            logger.error(
+                "meal_record.cancel: scan_update 失败, open_id={} record_id={} fallback_record_id={} date={} meal={} direct_error={} error={}",
+                open_id,
+                record_id or "",
+                match.record_id,
+                target_date.isoformat(),
+                meal.value,
+                str(direct_error) if direct_error else "",
+                error_message,
+            )
+            return CancelMealResult(status="failed", record_id=target_record_id, error_message=error_message)
         logger.debug(
             "meal_record.cancel: mode=scan_update date={} meal={} scan={}ms write={}ms total={}ms",
             target_date.isoformat(),
@@ -428,7 +491,7 @@ class BitableRepository:
             int((mono_time.monotonic() - write_started) * 1000),
             int((mono_time.monotonic() - started_at) * 1000),
         )
-        return target_record_id
+        return CancelMealResult(status="cancelled", record_id=target_record_id)
 
     def count_meal_records(self, *, target_date: date, meal: Meal) -> int:
         rows = self._list_meal_rows(

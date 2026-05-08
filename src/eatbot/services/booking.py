@@ -25,8 +25,14 @@ from eatbot.config import RuntimeConfig
 from eatbot.domain.cards import LeaveCardBuilder, ReservationCardBuilder
 from eatbot.domain.decision import MealPlanDecider, parse_meals
 from eatbot.domain.models import DailyMealPlan, Meal, MealScheduleRule, UserProfile
-from eatbot.services.repositories import BitableRepository, MealFeeArchiveRecord
+from eatbot.services.repositories import BitableRepository, CancelMealResult, MealFeeArchiveRecord
 from eatbot.adapters.feishu_clients import FeishuApiError, IMAdapter
+
+
+@dataclass(slots=True, frozen=True)
+class ApplySelectionResult:
+    record_ids: dict[Meal, str | None]
+    cancel_failed: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -64,6 +70,7 @@ class CardCallbackUpdateContext:
 class BookingService:
     _ALL_MEALS = {Meal.LUNCH, Meal.DINNER}
     _USER_NOT_FOUND_TEXT = "你不在后台用户列表中，请联系管理员。"
+    _CANCEL_FAILED_TEXT = "取消失败，请联系管理员。"
     _FEISHU_BOT_UNAVAILABLE_CODE = "230013"
 
     def __init__(
@@ -1119,7 +1126,7 @@ class BookingService:
                     return ("error", f"{blocked_meal.value} 已过截止时间，如有特殊情况请联系管理员人工处理", None)
             _mark("parse_and_validate")
 
-            updated_record_ids = self._apply_selection(
+            apply_result = self._apply_selection(
                 target_date=target_date,
                 operator_open_id=operator_open_id,
                 changed_meals=changed_meals,
@@ -1128,6 +1135,22 @@ class BookingService:
                 meal_record_ids=meal_record_ids,
             )
             _mark("apply_selection")
+
+            if apply_result.cancel_failed:
+                self._send_cancel_failed_notice(open_id=operator_open_id)
+                card_payload = self._card_builder.build_payload(
+                    target_date=target_date,
+                    lunch_cutoff=self._config.schedule.lunch_cutoff,
+                    dinner_cutoff=self._config.schedule.dinner_cutoff,
+                    user_open_id=operator_open_id,
+                    allowed_meals=allowed,
+                    default_meals=defaults,
+                    selected_meals=selected_before,
+                    meal_prices=meal_prices,
+                    meal_record_ids=meal_record_ids,
+                )
+                _mark("build_card")
+                return ("error", self._CANCEL_FAILED_TEXT, card_payload)
 
             card_payload = self._card_builder.build_payload(
                 target_date=target_date,
@@ -1138,7 +1161,7 @@ class BookingService:
                 default_meals=defaults,
                 selected_meals=selected,
                 meal_prices=meal_prices,
-                meal_record_ids=updated_record_ids,
+                meal_record_ids=apply_result.record_ids,
             )
             _mark("build_card")
             return ("info", "预约已更新", card_payload)
@@ -1163,57 +1186,73 @@ class BookingService:
         selected: set[Meal],
         meal_prices: dict[Meal, Decimal],
         meal_record_ids: dict[Meal, str | None],
-    ) -> dict[Meal, str | None]:
+    ) -> ApplySelectionResult:
         started_at = mono_time.monotonic()
         updated_record_ids = dict(meal_record_ids)
 
         write_started = mono_time.monotonic()
         upsert_count = 0
         cancel_count = 0
-        for meal in changed_meals:
+        for meal in self._sorted_changed_meals(changed_meals):
             record_id = updated_record_ids.get(meal)
             if meal in selected:
-                price = meal_prices.get(meal)
-                if price is None:
-                    raise ValueError(f"{meal.value} 单价缺失")
-                has_record_id = bool(record_id)
-                op_started = mono_time.monotonic()
-                record_id = self._repository.upsert_meal_record(
-                    target_date=target_date,
-                    open_id=operator_open_id,
-                    meal=meal,
-                    price=price,
-                    record_id=record_id,
-                    prefer_direct=True,
-                )
-                upsert_count += 1
-                updated_record_ids[meal] = record_id
-                logger.debug(
-                    "预约写入耗时: op=upsert meal={} date={} direct={} cost={}ms",
-                    meal.value,
+                continue
+            op_started = mono_time.monotonic()
+            result = self._repository.cancel_meal_record(
+                target_date=target_date,
+                open_id=operator_open_id,
+                meal=meal,
+                record_id=record_id,
+                prefer_direct=True,
+            )
+            cancel_count += 1
+            if result.status == "failed":
+                logger.error(
+                    "预约取消失败: open_id={} date={} meal={} record_id={} error={}",
+                    operator_open_id,
                     target_date.isoformat(),
-                    has_record_id,
-                    int((mono_time.monotonic() - op_started) * 1000),
-                )
-            else:
-                op_started = mono_time.monotonic()
-                kept_id = self._repository.cancel_meal_record(
-                    target_date=target_date,
-                    open_id=operator_open_id,
-                    meal=meal,
-                    record_id=record_id,
-                    prefer_direct=True,
-                )
-                cancel_count += 1
-                if kept_id is not None:
-                    updated_record_ids[meal] = kept_id
-                logger.debug(
-                    "预约写入耗时: op=cancel meal={} date={} has_record={} cost={}ms",
                     meal.value,
-                    target_date.isoformat(),
-                    bool(record_id),
-                    int((mono_time.monotonic() - op_started) * 1000),
+                    record_id or "",
+                    result.error_message or "",
                 )
+                return ApplySelectionResult(record_ids=updated_record_ids, cancel_failed=True)
+            if result.record_id is not None:
+                updated_record_ids[meal] = result.record_id
+            logger.debug(
+                "预约写入耗时: op=cancel meal={} date={} has_record={} status={} cost={}ms",
+                meal.value,
+                target_date.isoformat(),
+                bool(record_id),
+                result.status,
+                int((mono_time.monotonic() - op_started) * 1000),
+            )
+
+        for meal in self._sorted_changed_meals(changed_meals):
+            record_id = updated_record_ids.get(meal)
+            if meal not in selected:
+                continue
+            price = meal_prices.get(meal)
+            if price is None:
+                raise ValueError(f"{meal.value} 单价缺失")
+            has_record_id = bool(record_id)
+            op_started = mono_time.monotonic()
+            record_id = self._repository.upsert_meal_record(
+                target_date=target_date,
+                open_id=operator_open_id,
+                meal=meal,
+                price=price,
+                record_id=record_id,
+                prefer_direct=True,
+            )
+            upsert_count += 1
+            updated_record_ids[meal] = record_id
+            logger.debug(
+                "预约写入耗时: op=upsert meal={} date={} direct={} cost={}ms",
+                meal.value,
+                target_date.isoformat(),
+                has_record_id,
+                int((mono_time.monotonic() - op_started) * 1000),
+            )
 
         write_cost = int((mono_time.monotonic() - write_started) * 1000)
         total_cost = int((mono_time.monotonic() - started_at) * 1000)
@@ -1228,7 +1267,11 @@ class BookingService:
             cancel_count,
             total_cost,
         )
-        return updated_record_ids
+        return ApplySelectionResult(record_ids=updated_record_ids)
+
+    @staticmethod
+    def _sorted_changed_meals(meals: set[Meal]) -> list[Meal]:
+        return sorted(meals, key=lambda item: (0 if item == Meal.LUNCH else 1, item.value))
 
     def _apply_leave_range(
         self,
@@ -1345,28 +1388,41 @@ class BookingService:
 
         disallowed_rows = _pick_rows_by_meal(rows=rows, allowed_meals=disallowed_meals)
         changed_meals: set[Meal] = set()
+        attempted = False
         for meal in disallowed_meals:
             row = disallowed_rows.get(meal)
             if row is None or not bool(getattr(row, "reservation_status", False)):
                 continue
-            self._repository.cancel_meal_record(
+            attempted = True
+            result = self._repository.cancel_meal_record(
                 target_date=target_date,
                 open_id=open_id,
                 meal=meal,
                 record_id=row.record_id,
                 prefer_direct=True,
             )
+            if result.status == "failed":
+                logger.error(
+                    "自动取消不可预约餐次失败: date={} open_id={} meal={} record_id={} error={}",
+                    target_date.isoformat(),
+                    open_id,
+                    meal.value,
+                    row.record_id,
+                    result.error_message or "",
+                )
+                continue
             changed_meals.add(meal)
 
-        if not changed_meals:
+        if not attempted:
             return rows
 
-        logger.info(
-            "根据用餐定时配置自动取消不可预约餐次: date={} open_id={} meals={}",
-            target_date.isoformat(),
-            open_id,
-            _format_meals(changed_meals),
-        )
+        if changed_meals:
+            logger.info(
+                "根据用餐定时配置自动取消不可预约餐次: date={} open_id={} meals={}",
+                target_date.isoformat(),
+                open_id,
+                _format_meals(changed_meals),
+            )
         return self._repository.list_user_meal_rows(target_date=target_date, open_id=open_id)
 
     def _load_user(self, open_id: str) -> UserProfile | None:
@@ -1464,6 +1520,17 @@ class BookingService:
                 str(exc),
             )
             return "failed"
+
+    def _send_cancel_failed_notice(self, *, open_id: str) -> None:
+        try:
+            self._im.send_text(open_id, self._CANCEL_FAILED_TEXT)
+        except Exception as exc:
+            logger.error(
+                "发送取消失败通知失败: open_id={} error_type={} error={}",
+                open_id,
+                exc.__class__.__name__,
+                str(exc),
+            )
 
     def _send_payment_qr_notice(self, *, open_id: str, log_name: str) -> str:
         try:

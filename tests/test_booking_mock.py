@@ -14,6 +14,7 @@ from eatbot.adapters.feishu_clients import FeishuApiError
 from eatbot.config import RuntimeConfig
 from eatbot.domain.models import Meal, MealScheduleRule, UserProfile
 from eatbot.services.booking import BookingService
+from eatbot.services.repositories import CancelMealResult
 
 
 def build_config() -> RuntimeConfig:
@@ -107,10 +108,20 @@ def build_action_value(
     return value
 
 
+def meal_button_status(payload: dict, meal: Meal) -> str:
+    button = next(
+        item
+        for item in payload["body"]["elements"]
+        if item.get("tag") == "button" and item["text"]["content"] == meal.value
+    )
+    return button["type"]
+
+
 class TestBookingServiceMock:
     def setup_method(self) -> None:
         self.repo = Mock()
         self.repo.upsert_meal_record.return_value = "rec_default"
+        self.repo.cancel_meal_record.return_value = CancelMealResult(status="cancelled", record_id="rec_default")
         self.repo.list_user_meal_rows.return_value = []
         self.repo.list_reserved_meal_rows.return_value = []
         self.repo.cancel_reserved_meal_rows.return_value = 0
@@ -495,6 +506,38 @@ class TestBookingServiceMock:
         assert response["toast"]["type"] == "info"
         assert response["card"]["type"] == "raw"
 
+    def test_handle_card_frame_action_reports_cancel_failure_and_keeps_original_selection(self) -> None:
+        self.repo.list_user_meal_rows.return_value = [
+            make_meal_row(Meal.LUNCH, reservation_status=True, record_id="rec_lunch")
+        ]
+        self.repo.cancel_meal_record.return_value = CancelMealResult(
+            status="failed",
+            record_id="rec_lunch",
+            error_message="更新记录失败, log_id=test_log",
+        )
+        data = SimpleNamespace(
+            open_id="ou_sender",
+            action=SimpleNamespace(
+                value=build_action_value(
+                    action="toggle_meal",
+                    target_open_id="ou_sender",
+                    allowed_meals=["午餐", "晚餐"],
+                    default_meals=["午餐"],
+                    selected_meals=["午餐"],
+                    toggle_meal="午餐",
+                    meal_record_ids={"午餐": "rec_lunch", "晚餐": None},
+                ),
+                form_value={},
+            ),
+        )
+
+        response = self.service.handle_card_frame_action(data)
+
+        assert response["toast"]["type"] == "error"
+        assert response["toast"]["content"] == "取消失败，请联系管理员。"
+        assert meal_button_status(response["card"]["data"], Meal.LUNCH) == "primary"
+        self.im.send_text.assert_called_once_with("ou_sender", "取消失败，请联系管理员。")
+
     def test_handle_card_action_revalidate_schedule_and_cancel_disallowed_meal(self) -> None:
         target_date = date(2026, 12, 31)
         self.repo.list_schedule_rules.return_value = [
@@ -543,6 +586,49 @@ class TestBookingServiceMock:
             item for item in payload["body"]["elements"] if item.get("tag") == "button" and item["text"]["content"] in {"午餐", "晚餐"}
         ]
         assert [item["text"]["content"] for item in meal_buttons] == ["午餐"]
+
+    def test_handle_card_action_revalidate_schedule_keeps_disallowed_meal_when_cancel_fails(self) -> None:
+        target_date = date(2026, 12, 31)
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(
+                start_date=target_date,
+                end_date=target_date,
+                meals={Meal.LUNCH},
+            )
+        ]
+        self.repo.list_user_meal_rows.side_effect = [
+            [make_meal_row(Meal.DINNER, reservation_status=True, record_id="rec_dinner_existing")],
+            [make_meal_row(Meal.DINNER, reservation_status=True, record_id="rec_dinner_existing")],
+        ]
+        self.repo.cancel_meal_record.return_value = CancelMealResult(
+            status="failed",
+            record_id="rec_dinner_existing",
+            error_message="更新记录失败, log_id=test_log",
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["晚餐"],
+                        toggle_meal="晚餐",
+                        meal_record_ids={"午餐": None, "晚餐": "rec_dinner_existing"},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = self.service.handle_card_action(data)
+
+        assert response.toast.type == "info"
+        assert "不可预约" in response.toast.content
+        self.im.send_text.assert_not_called()
+        assert self.repo.list_user_meal_rows.call_count == 2
 
     def test_handle_card_action_refresh_state_only_reads_records(self) -> None:
         self.repo.list_user_meal_rows.return_value = [
@@ -782,6 +868,99 @@ class TestBookingServiceMock:
         assert kwargs["card_payload"] is not None
         assert kwargs["toast_content"] == "预约已更新"
         self.im.patch_interactive.assert_not_called()
+
+    def test_handle_card_action_with_token_reports_cancel_failure_and_sends_notice(self) -> None:
+        tasks: list = []
+        self.repo.list_user_meal_rows.return_value = [
+            make_meal_row(Meal.LUNCH, reservation_status=True, record_id="rec_lunch"),
+            make_meal_row(Meal.DINNER, reservation_status=False, record_id="rec_dinner"),
+        ]
+        self.repo.cancel_meal_record.return_value = CancelMealResult(
+            status="failed",
+            record_id="rec_lunch",
+            error_message="更新记录失败, log_id=test_log",
+        )
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_cancel_failed",
+                context=SimpleNamespace(open_message_id=None),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["午餐"],
+                        toggle_meal="午餐",
+                        meal_record_ids={"午餐": "rec_lunch", "晚餐": "rec_dinner"},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+        assert response.toast.type == "info"
+        assert response.toast.content == "处理中"
+
+        tasks[0]()
+
+        kwargs = self.im.delay_update_card.call_args.kwargs
+        assert kwargs["toast_type"] == "error"
+        assert kwargs["toast_content"] == "取消失败，请联系管理员。"
+        assert meal_button_status(kwargs["card_payload"], Meal.LUNCH) == "primary"
+        self.im.send_text.assert_called_once_with("ou_sender", "取消失败，请联系管理员。")
+
+    def test_handle_card_action_cancel_failure_notice_failure_does_not_hide_card_error(self) -> None:
+        tasks: list = []
+        self.repo.list_user_meal_rows.return_value = [
+            make_meal_row(Meal.LUNCH, reservation_status=True, record_id="rec_lunch"),
+        ]
+        self.repo.cancel_meal_record.return_value = CancelMealResult(
+            status="failed",
+            record_id="rec_lunch",
+            error_message="更新记录失败, log_id=test_log",
+        )
+        self.im.send_text.side_effect = FeishuApiError("im.v1.message.create 调用失败, code=999, log_id=text_log")
+        service = BookingService(
+            config=build_config(),
+            repository=self.repo,
+            im=self.im,
+            background_runner=tasks.append,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                token="c_token_cancel_failed_notice_failed",
+                context=SimpleNamespace(open_message_id=None),
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=["午餐"],
+                        toggle_meal="午餐",
+                        meal_record_ids={"午餐": "rec_lunch", "晚餐": None},
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        service.handle_card_action(data)
+        tasks[0]()
+
+        kwargs = self.im.delay_update_card.call_args.kwargs
+        assert kwargs["toast_type"] == "error"
+        assert kwargs["toast_content"] == "取消失败，请联系管理员。"
 
     def test_handle_card_action_token_update_code_10002_falls_back_to_open_message_id_patch(self) -> None:
         tasks: list = []

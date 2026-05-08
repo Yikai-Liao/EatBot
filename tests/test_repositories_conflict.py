@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from eatbot.adapters.feishu_clients import FieldMeta, TableFieldMapping
+from eatbot.adapters.feishu_clients import FeishuApiError, FieldMeta, TableFieldMapping
 from eatbot.config import RuntimeConfig
 from eatbot.domain.models import Meal
 from eatbot.services.repositories import BitableRepository, MealFeeArchiveRecord, MealFeeSummary
@@ -70,11 +70,14 @@ class _FakeBitable:
         self._records_by_table = records_by_table
         self.updated_records: list[tuple[str, str, dict]] = []
         self.created_records: list[tuple[str, dict]] = []
+        self.fail_update_record_ids: set[str] = set()
 
     def list_records(self, table_id: str, *, filter_expr: str | None = None) -> list[SimpleNamespace]:
         return list(self._records_by_table.get(table_id, []))
 
     def update_record(self, table_id: str, record_id: str, fields: dict) -> SimpleNamespace:
+        if record_id in self.fail_update_record_ids:
+            raise FeishuApiError(f"更新记录失败, record_id={record_id}, log_id=test_log")
         self.updated_records.append((table_id, record_id, fields))
         return SimpleNamespace(record_id=record_id, fields=fields)
 
@@ -292,7 +295,7 @@ def test_cancel_meal_record_only_updates_reservation_status_without_overwriting_
     )
     repo = BitableRepository(config=build_config(), bitable=bitable, mappings=_build_mappings())
 
-    kept_id = repo.cancel_meal_record(
+    result = repo.cancel_meal_record(
         target_date=target_date,
         open_id="ou_1",
         meal=Meal.LUNCH,
@@ -300,10 +303,79 @@ def test_cancel_meal_record_only_updates_reservation_status_without_overwriting_
         prefer_direct=True,
     )
 
-    assert kept_id == "r1"
+    assert result.status == "cancelled"
+    assert result.record_id == "r1"
     assert bitable.updated_records[-1][0] == "tbl_record"
     assert bitable.updated_records[-1][1] == "r1"
     assert bitable.updated_records[-1][2] == {"预约状态": False}
+
+
+def test_cancel_meal_record_direct_failure_fallback_scan_success() -> None:
+    target_date = date(2026, 2, 14)
+    bitable = _FakeBitable(
+        {
+            "tbl_record": [
+                SimpleNamespace(
+                    record_id="r_fallback",
+                    fields={
+                        "日期": "2026-02-14",
+                        "用餐者": [{"id": "ou_1"}],
+                        "餐食类型": Meal.LUNCH.value,
+                        "价格": "20",
+                        "预约状态": True,
+                    },
+                ),
+            ]
+        }
+    )
+    bitable.fail_update_record_ids.add("r_stale")
+    repo = BitableRepository(config=build_config(), bitable=bitable, mappings=_build_mappings())
+
+    result = repo.cancel_meal_record(
+        target_date=target_date,
+        open_id="ou_1",
+        meal=Meal.LUNCH,
+        record_id="r_stale",
+        prefer_direct=True,
+    )
+
+    assert result.status == "cancelled"
+    assert result.record_id == "r_fallback"
+    assert bitable.updated_records[-1] == ("tbl_record", "r_fallback", {"预约状态": False})
+
+
+def test_cancel_meal_record_direct_failure_fallback_failure_returns_failed() -> None:
+    target_date = date(2026, 2, 14)
+    bitable = _FakeBitable(
+        {
+            "tbl_record": [
+                SimpleNamespace(
+                    record_id="r_fallback",
+                    fields={
+                        "日期": "2026-02-14",
+                        "用餐者": [{"id": "ou_1"}],
+                        "餐食类型": Meal.LUNCH.value,
+                        "价格": "20",
+                        "预约状态": True,
+                    },
+                ),
+            ]
+        }
+    )
+    bitable.fail_update_record_ids.update({"r_stale", "r_fallback"})
+    repo = BitableRepository(config=build_config(), bitable=bitable, mappings=_build_mappings())
+
+    result = repo.cancel_meal_record(
+        target_date=target_date,
+        open_id="ou_1",
+        meal=Meal.LUNCH,
+        record_id="r_stale",
+        prefer_direct=True,
+    )
+
+    assert result.status == "failed"
+    assert result.record_id == "r_fallback"
+    assert "log_id=test_log" in (result.error_message or "")
 
 
 def test_list_meal_fee_summaries_use_closed_interval_and_later_record() -> None:
