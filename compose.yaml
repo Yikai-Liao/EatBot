@@ -12,5 +12,8 @@ services:
     volumes:
       - ./config.shared.toml:/app/config.shared.toml:ro
       - ./config.local.toml:/app/config.local.toml:ro
-      - ./logs:/app/logs
+      - eatbot_logs:/app/logs
     command: ["eatbot", "run"]
+
+volumes:
+  eatbot_logs:

@@ -187,6 +187,8 @@ docker compose up -d
 docker compose logs -f eatbot
 ```
 
+Compose 使用 Docker named volume `eatbot_logs` 挂载 `/app/logs`，避免宿主机 bind mount 目录权限导致容器内非 root 用户无法写日志。
+
 如果只需要单独的 Compose 文件：
 
 ```bash
