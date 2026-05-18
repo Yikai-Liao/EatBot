@@ -64,6 +64,8 @@ class FieldNamesConfig(BaseModel):
 
 class ScheduleConfig(BaseModel):
     send_time: str = "09:00"
+    send_cards_for_next_day: bool = False
+    card_request_cutover: str = "19:00"
     lunch_cutoff: str = "10:30"
     dinner_cutoff: str = "16:30"
     lunch_min_reserved_count: int = 0
@@ -73,7 +75,7 @@ class ScheduleConfig(BaseModel):
     send_stat_offset: str = "00:00:00"
     schedule_cache_ttl_minutes: int = 30
 
-    @field_validator("send_time", "lunch_cutoff", "dinner_cutoff", "fee_archive_time")
+    @field_validator("send_time", "card_request_cutover", "lunch_cutoff", "dinner_cutoff", "fee_archive_time")
     @classmethod
     def validate_hhmm(cls, value: str) -> str:
         _parse_hhmm(value)
@@ -111,6 +113,10 @@ class ScheduleConfig(BaseModel):
         return _parse_hhmm(self.send_time)
 
     @property
+    def card_request_cutover_obj(self) -> time:
+        return _parse_hhmm(self.card_request_cutover)
+
+    @property
     def lunch_cutoff_obj(self) -> time:
         return _parse_hhmm(self.lunch_cutoff)
 
@@ -139,6 +145,18 @@ class ScheduleConfig(BaseModel):
             raise ValueError("lunch_cutoff + send_stat_offset 超出当天范围")
         if dinner_seconds + offset_seconds >= 24 * 3600:
             raise ValueError("dinner_cutoff + send_stat_offset 超出当天范围")
+        return self
+
+    @model_validator(mode="after")
+    def validate_send_card_window(self) -> "ScheduleConfig":
+        send_time = self.send_time_obj
+        cutover = self.card_request_cutover_obj
+        if self.send_cards_for_next_day:
+            if send_time < cutover:
+                raise ValueError("send_cards_for_next_day=true 时 send_time 必须大于等于 card_request_cutover")
+            return self
+        if send_time >= cutover:
+            raise ValueError("send_cards_for_next_day=false 时 send_time 必须小于 card_request_cutover")
         return self
 
 
@@ -209,7 +227,7 @@ class RuntimeConfig(BaseModel):
     app_id: str
     app_secret: str
     app_token: str
-    help_doc: str = "发送“卡片”获取当日预约卡片，发送“付款码”获取付款码，发送“帮助”查看帮助文档。"
+    help_doc: str = "发送“卡片”获取当前预约窗口卡片，发送“付款码”获取付款码，发送“帮助”查看帮助文档。"
     timezone: str = "Asia/Shanghai"
     wiki_token: str | None = None
     commands: CommandsConfig = Field(default_factory=CommandsConfig)

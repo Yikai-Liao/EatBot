@@ -117,18 +117,18 @@ class BookingService:
                 logger.exception("给用户发卡失败, user={}, open_id={}", user.display_name, user.open_id)
 
     def send_card_to_user_today(self, open_id: str) -> None:
-        today = self._now().date()
+        target_date = self._card_request_target_date(self._now())
         user = self._load_user(open_id)
         if user is None:
             self._im.send_text(open_id, self._USER_NOT_FOUND_TEXT)
             return
 
-        plan = self._plan_for_date(today)
+        plan = self._plan_for_date(target_date)
         if not plan.meals:
-            self._im.send_text(open_id, f"{today.isoformat()} 不在订餐发送范围（{plan.reason}）。")
+            self._im.send_text(open_id, f"{target_date.isoformat()} 不在订餐发送范围（{plan.reason}）。")
             return
 
-        self._send_card_to_user(user=user, target_date=today, allowed_meals=plan.meals)
+        self._send_card_to_user(user=user, target_date=target_date, allowed_meals=plan.meals)
 
     def send_leave_card_to_user(self, open_id: str) -> None:
         user = self._load_user(open_id)
@@ -1491,6 +1491,12 @@ class BookingService:
         if now.tzinfo is None:
             return now.replace(tzinfo=self._timezone)
         return now.astimezone(self._timezone)
+
+    def _card_request_target_date(self, now: datetime) -> date:
+        target_date = now.date()
+        if now.time() >= self._config.schedule.card_request_cutover_obj:
+            return target_date + timedelta(days=1)
+        return target_date
 
     @classmethod
     def _is_bot_unavailable_error(cls, exc: FeishuApiError) -> bool:

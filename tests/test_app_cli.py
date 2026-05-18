@@ -13,11 +13,20 @@ from typer.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from eatbot.app import _parse_cli_date, _parse_cli_datetime, build_cron_job_specs, configure_logging, cli, list_cron_trigger_events
+from eatbot.app import (
+    CronAction,
+    EatBotApplication,
+    _parse_cli_date,
+    _parse_cli_datetime,
+    build_cron_job_specs,
+    cli,
+    configure_logging,
+    list_cron_trigger_events,
+)
 from eatbot.config import RuntimeConfig, ScheduleConfig
 
 
-def build_runtime_config() -> RuntimeConfig:
+def build_runtime_config(schedule: dict | None = None) -> RuntimeConfig:
     return RuntimeConfig.model_validate(
         {
             "app_id": "id",
@@ -62,6 +71,7 @@ def build_runtime_config() -> RuntimeConfig:
                     "fee": "费用",
                 },
             },
+            **({"schedule": schedule} if schedule is not None else {}),
         }
     )
 
@@ -129,6 +139,68 @@ def test_build_cron_job_specs_include_fee_archive_job() -> None:
     assert by_job["daily_fee_archive"].second == 0
 
 
+def test_schedule_config_accepts_next_day_send_after_cutover() -> None:
+    schedule = ScheduleConfig(send_cards_for_next_day=True, card_request_cutover="19:00", send_time="19:10")
+
+    assert schedule.send_cards_for_next_day is True
+
+
+def test_schedule_config_rejects_next_day_send_before_cutover() -> None:
+    with pytest.raises(ValueError, match="send_cards_for_next_day=true"):
+        ScheduleConfig(send_cards_for_next_day=True, card_request_cutover="19:00", send_time="10:00")
+
+
+def test_schedule_config_accepts_same_day_send_before_cutover() -> None:
+    schedule = ScheduleConfig(send_cards_for_next_day=False, card_request_cutover="19:00", send_time="10:00")
+
+    assert schedule.send_cards_for_next_day is False
+
+
+def test_schedule_config_rejects_same_day_send_at_or_after_cutover() -> None:
+    with pytest.raises(ValueError, match="send_cards_for_next_day=false"):
+        ScheduleConfig(send_cards_for_next_day=False, card_request_cutover="19:00", send_time="19:10")
+
+
+def test_execute_cron_send_cards_uses_next_day_target_date() -> None:
+    runtime_config = build_runtime_config(
+        {"send_cards_for_next_day": True, "card_request_cutover": "19:00", "send_time": "19:10"}
+    )
+    app = EatBotApplication(enable_scheduler=False)
+    app._config = runtime_config
+    app._booking = Mock()
+
+    app.execute_cron_action(CronAction.SEND_CARDS, run_at=datetime(2026, 2, 13, 19, 10))
+
+    app._booking.send_daily_cards.assert_called_once_with(target_date=date(2026, 2, 14))
+
+
+def test_execute_cron_send_cards_uses_same_day_target_date() -> None:
+    runtime_config = build_runtime_config(
+        {"send_cards_for_next_day": False, "card_request_cutover": "19:00", "send_time": "10:00"}
+    )
+    app = EatBotApplication(enable_scheduler=False)
+    app._config = runtime_config
+    app._booking = Mock()
+
+    app.execute_cron_action(CronAction.SEND_CARDS, run_at=datetime(2026, 2, 13, 10, 0))
+
+    app._booking.send_daily_cards.assert_called_once_with(target_date=date(2026, 2, 13))
+
+
+def test_execute_cron_stats_keep_run_date_in_next_day_card_mode() -> None:
+    runtime_config = build_runtime_config(
+        {"send_cards_for_next_day": True, "card_request_cutover": "19:00", "send_time": "19:10"}
+    )
+    app = EatBotApplication(enable_scheduler=False)
+    app._config = runtime_config
+    app._booking = Mock()
+
+    app.execute_cron_action(CronAction.LUNCH_STATS, run_at=datetime(2026, 2, 13, 10, 21))
+
+    app._booking.send_stats.assert_called_once()
+    assert app._booking.send_stats.call_args.args[0] == date(2026, 2, 13)
+
+
 def test_send_cards_command_passes_date(runner: CliRunner) -> None:
     with patch("eatbot.app._bootstrap_application") as mocked_bootstrap:
         app = Mock()
@@ -141,14 +213,12 @@ def test_send_cards_command_passes_date(runner: CliRunner) -> None:
 
 
 def test_root_without_subcommand_runs_service(runner: CliRunner) -> None:
-    with patch("eatbot.app._bootstrap_application") as mocked_bootstrap:
-        app = Mock()
-        mocked_bootstrap.return_value = app
+    with patch("eatbot.app._run_service") as mocked_run_service:
 
         result = runner.invoke(cli, [])
 
     assert result.exit_code == 0, result.output
-    app.run.assert_called_once()
+    mocked_run_service.assert_called_once()
 
 
 def test_send_stats_command_all(runner: CliRunner) -> None:

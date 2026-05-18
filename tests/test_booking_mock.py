@@ -17,13 +17,13 @@ from eatbot.services.booking import BookingService
 from eatbot.services.repositories import CancelMealResult
 
 
-def build_config() -> RuntimeConfig:
+def build_config(schedule: dict | None = None) -> RuntimeConfig:
     return RuntimeConfig.model_validate(
         {
             "app_id": "id",
             "app_secret": "secret",
             "app_token": "app",
-            "help_doc": "帮助文档：发送“卡片”获取当日卡片，发送“帮助”查看说明。",
+            "help_doc": "帮助文档：发送“卡片”获取当前预约窗口卡片，发送“帮助”查看说明。",
             "tables": {
                 "user_config": "t1",
                 "meal_schedule": "t2",
@@ -63,6 +63,7 @@ def build_config() -> RuntimeConfig:
                     "fee": "费用",
                 },
             },
+            **({"schedule": schedule} if schedule is not None else {}),
         }
     )
 
@@ -1533,6 +1534,60 @@ class TestBookingServiceMock:
 
         self.im.send_text.assert_called_once_with("ou_sender", "你不在后台用户列表中，请联系管理员。")
         self.im.send_interactive.assert_not_called()
+
+    def test_send_card_to_user_today_before_cutover_uses_current_date(self) -> None:
+        service = BookingService(
+            config=build_config({"card_request_cutover": "19:00"}),
+            repository=self.repo,
+            im=self.im,
+            now_provider=lambda: datetime(2026, 2, 13, 18, 59),
+        )
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(start_date=date(2026, 2, 13), end_date=date(2026, 2, 13), meals={Meal.LUNCH})
+        ]
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
+
+        service.send_card_to_user_today("ou_sender")
+
+        sent_card = self.im.send_interactive.call_args.kwargs["card_json"]
+        payload = json.loads(sent_card)
+        assert payload["header"]["title"]["content"] == "食堂预约 2026-02-13 周五"
+
+    def test_send_card_to_user_today_at_cutover_uses_next_date(self) -> None:
+        service = BookingService(
+            config=build_config({"card_request_cutover": "19:00"}),
+            repository=self.repo,
+            im=self.im,
+            now_provider=lambda: datetime(2026, 2, 13, 19, 0),
+        )
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(start_date=date(2026, 2, 14), end_date=date(2026, 2, 14), meals={Meal.LUNCH})
+        ]
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
+
+        service.send_card_to_user_today("ou_sender")
+
+        sent_card = self.im.send_interactive.call_args.kwargs["card_json"]
+        payload = json.loads(sent_card)
+        assert payload["header"]["title"]["content"] == "食堂预约 2026-02-14 周六"
+
+    def test_send_card_to_user_today_after_midnight_uses_current_date(self) -> None:
+        service = BookingService(
+            config=build_config({"card_request_cutover": "19:00"}),
+            repository=self.repo,
+            im=self.im,
+            now_provider=lambda: datetime(2026, 2, 14, 0, 1),
+        )
+        self.repo.list_schedule_rules.return_value = [
+            MealScheduleRule(start_date=date(2026, 2, 14), end_date=date(2026, 2, 14), meals={Meal.LUNCH})
+        ]
+        self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender")]
+
+        service.send_card_to_user_today("ou_sender")
+
+        sent_card = self.im.send_interactive.call_args.kwargs["card_json"]
+        payload = json.loads(sent_card)
+        assert payload["header"]["title"]["content"] == "食堂预约 2026-02-14 周六"
 
     def test_handle_card_action_rejects_when_after_cutoff_with_simulated_now(self) -> None:
         service = BookingService(

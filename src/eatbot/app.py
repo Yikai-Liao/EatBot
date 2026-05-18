@@ -137,6 +137,13 @@ def list_cron_trigger_events(
     return events
 
 
+def target_date_for_cron_action(action: CronAction, *, schedule: ScheduleConfig, run_at: datetime) -> date:
+    target_date = run_at.date()
+    if action == CronAction.SEND_CARDS and schedule.send_cards_for_next_day:
+        return target_date + timedelta(days=1)
+    return target_date
+
+
 class EatBotApplication:
     def __init__(
         self,
@@ -225,7 +232,11 @@ class EatBotApplication:
             raise RuntimeError("应用未初始化")
 
         localized_run_at = _to_runtime_timezone(run_at, self._config.timezone)
-        target_date = localized_run_at.date()
+        target_date = target_date_for_cron_action(
+            action,
+            schedule=self._config.schedule,
+            run_at=localized_run_at,
+        )
         if action == CronAction.SEND_CARDS:
             self._booking.send_daily_cards(target_date=target_date)
             return
@@ -256,14 +267,20 @@ class EatBotApplication:
             raise RuntimeError("应用未初始化")
 
         localized_run_at = _to_runtime_timezone(run_at, self._config.timezone)
-        target_date = localized_run_at.date()
+        run_date = localized_run_at.date()
+        target_date = target_date_for_cron_action(
+            action,
+            schedule=self._config.schedule,
+            run_at=localized_run_at,
+        )
         weekday = _weekday_text(target_date)
 
         if action == CronAction.SEND_CARDS:
             will_execute, detail = self._booking.preview_daily_cards(target_date=target_date, snapshot=snapshot)
+            prefix = f"run_date={run_date.isoformat()}; target_date={target_date.isoformat()} {weekday}"
             return CronActionPreview(
                 will_execute=will_execute,
-                detail=f"date={target_date.isoformat()} {weekday}; {detail}",
+                detail=f"{prefix}; {detail}",
             )
         if action == CronAction.LUNCH_STATS:
             will_execute, detail = self._booking.preview_stats(
@@ -329,6 +346,7 @@ class EatBotApplication:
             (
                 "定时任务已启动: send={}, lunch_cutoff={}, dinner_cutoff={}, "
                 "stat_offset={}, lunch_stats={}, dinner_stats={}, "
+                "send_cards_for_next_day={}, card_request_cutover={}, "
                 "fee_archive_day={}, fee_archive_time={}"
             ),
             self._config.schedule.send_time,
@@ -337,6 +355,8 @@ class EatBotApplication:
             self._config.schedule.send_stat_offset,
             stats_lunch_time.strftime("%H:%M:%S"),
             stats_dinner_time.strftime("%H:%M:%S"),
+            self._config.schedule.send_cards_for_next_day,
+            self._config.schedule.card_request_cutover,
             self._config.schedule.fee_archive_day_of_month,
             self._config.schedule.fee_archive_time,
         )
@@ -642,7 +662,14 @@ def dev_cron_command(
         return
 
     app = _bootstrap_application(runtime_config=runtime_config, enable_scheduler=False)
-    preview_dates = {event.trigger_at.date() for event in events}
+    preview_dates = {
+        target_date_for_cron_action(
+            event.spec.action,
+            schedule=runtime_config.schedule,
+            run_at=event.trigger_at,
+        )
+        for event in events
+    }
     snapshot = app.build_cron_preview_snapshot(target_dates=preview_dates)
 
     typer.echo(
