@@ -1,0 +1,16 @@
+services:
+  eatbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eatbot:local
+    container_name: eatbot
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./config.shared.toml:/app/config.shared.toml:ro
+      - ./config.local.toml:/app/config.local.toml:ro
+      - ./logs:/app/logs
+    command: ["eatbot", "run"]
