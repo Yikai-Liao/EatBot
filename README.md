@@ -145,6 +145,7 @@ flowchart TD
 ## 5. 配置文件说明
 - `config.shared.toml`：可提交，保存全局时区、字段名映射、定时参数等共享配置。
 - `config.local.toml`：本地私密，保存 app_id、app_secret、app_token、wiki_token、tables 与日志配置。
+- `config.local.example.toml`：可提交的私密配置模板，部署时复制为 `config.local.toml` 后填写真实值。
 - `timezone`（根级）用于定义全局业务时区，表格日期解析、定时任务与统计口径都按该时区计算。
 - `config.shared.toml` 中 `schedule` 段用于配置发卡时间、发卡业务日期模式 `send_cards_for_next_day`、主动取卡切换点 `card_request_cutover`、午/晚餐截止时间、午/晚餐最小成团人数、统计偏移 `send_stat_offset` 以及用餐定时配置缓存时长 `schedule_cache_ttl_minutes`。
 - 用餐定时配置缓存默认 30 分钟；每日发卡任务开始前会强制刷新一次缓存，单批用户发送过程不重复拉表。
@@ -156,26 +157,62 @@ file_path = "logs/eatbot.log"
 max_size_mb = 20
 ```
 
-## 6. 飞书事件与回调配置（必配）
-### 6.1 回调订阅方式
+## 6. Release 镜像部署
+发布 GitHub Release 后，Actions 会构建 Docker 镜像并推送到 GHCR：
+
+- 版本镜像：`ghcr.io/yikai-liao/eatbot:<release-tag>`
+- 最新镜像：`ghcr.io/yikai-liao/eatbot:latest`
+- Release 资产：`eatbot-release.zip`、`compose.ghcr.yaml`
+
+`eatbot-release.zip` 内包含：
+
+- `compose.yaml`：已替换为 GHCR 版本镜像，不再本地 build。
+- `config.shared.toml`：共享配置。
+- `config.local.example.toml`：私密配置模板。
+
+从 latest release 下载并启动：
+
+```bash
+mkdir -p eatbot
+cd eatbot
+curl -L -o eatbot-release.zip https://github.com/Yikai-Liao/EatBot/releases/latest/download/eatbot-release.zip
+unzip -o eatbot-release.zip
+cp -n config.local.example.toml config.local.toml
+```
+
+编辑 `config.local.toml`，填入真实飞书应用凭据和多维表格 `table_id`，然后启动：
+
+```bash
+docker compose up -d
+docker compose logs -f eatbot
+```
+
+如果只需要单独的 Compose 文件：
+
+```bash
+curl -L -o compose.yaml https://github.com/Yikai-Liao/EatBot/releases/latest/download/compose.ghcr.yaml
+```
+
+## 7. 飞书事件与回调配置（必配）
+### 7.1 回调订阅方式
 - 选择：`使用长连接接收事件/回调`（推荐，适用于当前自建应用）。
 - 飞书后台路径：`开发配置 > 事件与回调`。
 
-### 6.2 需要添加的事件
+### 7.2 需要添加的事件
 - `im.message.receive_v1`：接收用户给机器人发的文本消息（如 `订餐`）。
 - `application.bot.menu_v6`：接收聊天栏功能按钮点击（如 `当日卡片`）。
 
-### 6.3 需要添加的回调
+### 7.3 需要添加的回调
 - `card.action.trigger`：接收卡片按钮点击并同步返回 `toast`/更新后的卡片。
 
-### 6.4 不要添加的旧回调
+### 7.4 不要添加的旧回调
 - `card.action.trigger_v1`：旧版协议，不用于当前实现。
 
-### 6.5 生效要求
+### 7.5 生效要求
 - 每次修改“事件与回调”配置后，都要创建并发布新版本，否则配置不会生效。
 - 若点击卡片报 `200340`，优先检查：回调订阅方式、`card.action.trigger` 是否已添加、应用版本是否已发布。
 
-## 7. 当前实现状态（2026-02-14）
+## 8. 当前实现状态（2026-02-14）
 - 已实现完整主流程：按全国官方工作日历发卡、卡片交互回写、截止控制、午晚餐统计发送。
 - 已接入飞书长连接事件：`im.message.receive_v1`、`application.bot.menu_v6`、`card.action.trigger`。
 - CLI 已统一为 Typer 命令树：`run`、`check`、`send cards`、`send stats`、`send text`、`dev listen`、`dev cron`。
@@ -185,7 +222,7 @@ max_size_mb = 20
 - 请假卡片复用同一套双阶段处理：先返回“处理中”，后台异步写入区间内的请假记录，完成后返回成功信号。
 - `dev listen` 长连接已显式忽略宿主机代理设置，避免在本地 SOCKS 环境里额外依赖 `python-socks`。
 
-## 8. 技术实现
+## 9. 技术实现
 - 事件接收：飞书长连接（WebSocket）模式。
 - `im.message.receive_v1`：使用 `asyncio` 协程调度异步处理，避免阻塞长连接主处理线程。
 - `application.bot.menu_v6`：使用 `asyncio` 协程调度异步处理，支持聊天栏“当日卡片”按钮主动发卡。
@@ -199,8 +236,8 @@ max_size_mb = 20
 - 日志：Loguru（stdout + file sink）。
 - 测试：Pytest。
 
-## 9. CLI 运行方式
-### 9.1 命令树
+## 10. CLI 运行方式
+### 10.1 命令树
 ```text
 eatbot
 ├─ check
@@ -214,7 +251,7 @@ eatbot
    └─ cron
 ```
 
-### 9.2 命令定义
+### 10.2 命令定义
 - 仓库内推荐入口：`uv run eatbot <command>`。
 
 - `eatbot check`
@@ -245,12 +282,12 @@ eatbot
 - 默认 dry-run：仅输出窗口内应触发的任务。
 - 加 `--execute`：按时间顺序执行窗口内应触发任务。
 
-### 9.3 参数语义
+### 10.3 参数语义
 - `--date`：业务日期（发卡/发统计对应哪一天）。
 - `--at`：虚拟当前时间（仅 `dev listen`，支持秒）。
 - `--from`/`--to`：定时器验证窗口（仅 `dev cron`，支持秒）。
 
-### 9.4 调用示例
+### 10.4 调用示例
 - `uv run eatbot check`
 - `uv run eatbot run`
 - `uv run eatbot run --log-level debug`

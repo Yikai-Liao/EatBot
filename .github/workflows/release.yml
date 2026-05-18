@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-publish:
+    name: Build image and release assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run tests
+        run: |
+          uv sync --frozen
+          uv run pytest
+
+      - name: Prepare image metadata
+        id: meta
+        run: |
+          repo_lc="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          image_name="ghcr.io/${repo_lc}"
+          version="${GITHUB_REF_NAME}"
+          {
+            echo "image_name=${image_name}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image_name }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build release assets
+        env:
+          IMAGE_REF: ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.version }}
+        run: |
+          mkdir -p dist/eatbot-release
+          awk -v image="${IMAGE_REF}" '
+            /^    build:/ { skip = 1; next }
+            skip && /^    image:/ { skip = 0 }
+            skip { next }
+            /^    image:/ { $0 = "    image: " image }
+            { print }
+          ' compose.yaml > dist/compose.ghcr.yaml
+          cp dist/compose.ghcr.yaml dist/eatbot-release/compose.yaml
+          cp config.shared.toml config.local.example.toml dist/eatbot-release/
+          (cd dist/eatbot-release && zip -r ../eatbot-release.zip .)
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/eatbot-release.zip \
+            dist/compose.ghcr.yaml \
+            --clobber

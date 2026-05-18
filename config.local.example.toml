@@ -1,0 +1,20 @@
+# 本地私密配置示例。
+# 复制为 config.local.toml 后填写真实飞书应用凭据和多维表格 table_id。
+
+app_id = "cli_xxxxxxxxxxxxxxxx"
+app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+app_token = "xxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# 如果应用使用 wiki 文档挂载多维表格，填写 wiki_token；否则可与 app_token 保持一致或按实际情况填写。
+wiki_token = "xxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[tables]
+user_config = "tblxxxxxxxxxxxxxxxx"
+meal_schedule = "tblxxxxxxxxxxxxxxxx"
+meal_record = "tblxxxxxxxxxxxxxxxx"
+stats_receivers = "tblxxxxxxxxxxxxxxxx"
+meal_fee_archive = "tblxxxxxxxxxxxxxxxx"
+
+[logging]
+file_path = "logs/eatbot.log"
+max_size_mb = 20
