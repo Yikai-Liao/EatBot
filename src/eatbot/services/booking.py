@@ -62,6 +62,17 @@ class MealFeeArchiveSummary:
 
 
 @dataclass(slots=True, frozen=True)
+class MealFeeArchiveExecutionPlan:
+    archive_records: list[MealFeeArchiveRecord]
+    user_notice_messages: list[tuple[str, str]]
+    admin_receivers: list[str]
+    admin_text: str | None
+    total_fee: Decimal
+    total_lunch_count: int
+    total_dinner_count: int
+
+
+@dataclass(slots=True, frozen=True)
 class CardCallbackUpdateContext:
     token: str | None
     open_message_id: str | None
@@ -72,6 +83,10 @@ class BookingService:
     _USER_NOT_FOUND_TEXT = "你不在后台用户列表中，请联系管理员。"
     _CANCEL_FAILED_TEXT = "取消失败，请联系管理员。"
     _FEISHU_BOT_UNAVAILABLE_CODE = "230013"
+    _RESERVATION_DISABLED_TEXT = "预约卡片功能已停用。"
+    _LEAVE_DISABLED_TEXT = "请假功能已停用。"
+    _RESERVATION_ACTIONS = {"toggle_meal", "refresh_state", "submit_reservation"}
+    _LEAVE_ACTIONS = {"select_leave_start", "select_leave_end", "submit_leave_range"}
 
     def __init__(
         self,
@@ -103,6 +118,10 @@ class BookingService:
         self._processing_users_lock = threading.Lock()
 
     def send_daily_cards(self, target_date: date | None = None) -> None:
+        if not self._reservation_interactions_enabled:
+            logger.info("预约卡片功能已停用，跳过每日发卡")
+            return
+
         target = target_date or self._now().date()
         plan = self._plan_for_date(target, force_refresh=True)
         if not plan.meals:
@@ -117,6 +136,10 @@ class BookingService:
                 logger.exception("给用户发卡失败, user={}, open_id={}", user.display_name, user.open_id)
 
     def send_card_to_user_today(self, open_id: str) -> None:
+        if not self._reservation_interactions_enabled:
+            self._im.send_text(open_id, self._RESERVATION_DISABLED_TEXT)
+            return
+
         target_date = self._card_request_target_date(self._now())
         user = self._load_user(open_id)
         if user is None:
@@ -131,6 +154,10 @@ class BookingService:
         self._send_card_to_user(user=user, target_date=target_date, allowed_meals=plan.meals)
 
     def send_leave_card_to_user(self, open_id: str) -> None:
+        if not self._reservation_interactions_enabled:
+            self._im.send_text(open_id, self._LEAVE_DISABLED_TEXT)
+            return
+
         user = self._load_user(open_id)
         if user is None:
             self._im.send_text(open_id, self._USER_NOT_FOUND_TEXT)
@@ -280,6 +307,9 @@ class BookingService:
         target_date: date,
         snapshot: CronPreviewSnapshot | None = None,
     ) -> tuple[bool, str]:
+        if not self._reservation_interactions_enabled:
+            return False, "预约卡片功能已停用"
+
         if snapshot is None:
             snapshot = self.build_cron_preview_snapshot(target_dates={target_date})
         plan = snapshot.plans_by_date.get(target_date) or self._plan_for_date(target_date)
@@ -331,12 +361,51 @@ class BookingService:
                 False,
                 f"非归档日; 本月归档日={window.run_date.isoformat()}",
             )
+        plan = self._prepare_meal_fee_archive_execution(window=window)
+        display_name_by_open_id = {
+            user.open_id: user.display_name
+            for user in self._repository.list_user_profiles()
+        }
+        lines = [
+            (
+                f"归档区间={window.start_date.isoformat()}~{window.end_date.isoformat()}（闭区间）; "
+                f"写归档表={len(plan.archive_records)} 条; "
+                f"用户通知={len(plan.user_notice_messages)}; "
+                f"管理员通知={len(plan.admin_receivers)}; "
+                f"总收款={_format_decimal(plan.total_fee)} 元"
+            )
+        ]
+        if plan.archive_records:
+            lines.append("归档写表:")
+            for record in plan.archive_records:
+                lines.append(
+                    (
+                        f"  - {_format_notice_target(record.open_id, display_name_by_open_id)}: "
+                        f"午餐={record.lunch_count} 晚餐={record.dinner_count} "
+                        f"费用={_format_decimal(record.fee)} 元"
+                    )
+                )
+        else:
+            lines.append("归档写表: 无记录")
+        if plan.admin_text is None:
+            lines.append("管理员通知: 无统计接收人配置")
+        else:
+            lines.append("管理员通知:")
+            for open_id in plan.admin_receivers:
+                lines.append(
+                    f"  - {_format_notice_target(open_id, display_name_by_open_id)} <- {plan.admin_text}"
+                )
+        if plan.user_notice_messages:
+            lines.append("用户通知:")
+            for open_id, user_text in plan.user_notice_messages:
+                lines.append(
+                    f"  - {_format_notice_target(open_id, display_name_by_open_id)} <- {user_text} [附带: 付款码]"
+                )
+        else:
+            lines.append("用户通知: 无需发送")
         return (
             True,
-            (
-                f"归档区间={window.start_date.isoformat()}~"
-                f"{window.end_date.isoformat()}（闭区间）"
-            ),
+            "\n".join(lines),
         )
 
     def archive_meal_fees(self, *, target_date: date | None = None) -> MealFeeArchiveSummary | None:
@@ -357,47 +426,20 @@ class BookingService:
             window.start_date.isoformat(),
             window.end_date.isoformat(),
         )
-        summaries = self._repository.list_meal_fee_summaries(start_date=window.start_date, end_date=window.end_date)
-        summary_by_open_id = {item.open_id: item for item in summaries}
-        target_open_ids = sorted(summary_by_open_id.keys())
-
-        total_fee = Decimal("0")
-        total_lunch_count = 0
-        total_dinner_count = 0
-        archive_records: list[MealFeeArchiveRecord] = []
-        user_notice_messages: list[tuple[str, str]] = []
-        for open_id in target_open_ids:
-            summary = summary_by_open_id.get(open_id)
-            fee = summary.total_fee if summary else Decimal("0")
-            lunch_count = summary.lunch_count if summary else 0
-            dinner_count = summary.dinner_count if summary else 0
-            meal_count = lunch_count + dinner_count
-            total_fee += fee
-            total_lunch_count += lunch_count
-            total_dinner_count += dinner_count
-            archive_records.append(
-                MealFeeArchiveRecord(
-                    open_id=open_id,
-                    fee=fee,
-                    lunch_count=lunch_count,
-                    dinner_count=dinner_count,
-                )
-            )
-            user_notice_messages.append(
-                (
-                    open_id,
-                    (
-                        f"餐费归档通知：{window.start_date.isoformat()}~{window.end_date.isoformat()}，"
-                        f"你本月午餐 {lunch_count} 顿，晚餐 {dinner_count} 顿，共 {meal_count} 顿，"
-                        f"餐费合计 {_format_decimal(fee)} 元。"
-                    ),
-                )
-            )
+        plan = self._prepare_meal_fee_archive_execution(window=window)
         self._repository.upsert_meal_fee_archive_records(
             start_date=window.start_date,
             end_date=window.end_date,
-            records=archive_records,
+            records=plan.archive_records,
         )
+        for record in plan.archive_records:
+            logger.debug(
+                "餐费归档写表明细: open_id={} lunch_count={} dinner_count={} fee={}",
+                record.open_id,
+                record.lunch_count,
+                record.dinner_count,
+                _format_decimal(record.fee),
+            )
 
         user_notice_sent = 0
         user_notice_skipped = 0
@@ -405,19 +447,16 @@ class BookingService:
         admin_notice_sent = 0
         admin_notice_skipped = 0
         admin_notice_failed = 0
-        receivers = self._repository.list_stats_receiver_open_ids()
-        if receivers:
-            total_meal_count = total_lunch_count + total_dinner_count
-            admin_text = (
-                f"[管理员] 餐费归档表已更新：{window.start_date.isoformat()}~"
-                f"{window.end_date.isoformat()}，"
-                f"午餐 {total_lunch_count} 人次，晚餐 {total_dinner_count} 人次，"
-                f"总计 {total_meal_count} 人次，总收款 {_format_decimal(total_fee)} 元。"
-            )
-            for open_id in receivers:
+        if plan.admin_text is not None:
+            for open_id in plan.admin_receivers:
+                logger.debug(
+                    "餐费归档管理员通知明细: open_id={} text={}",
+                    open_id,
+                    plan.admin_text,
+                )
                 result = self._send_text_notice(
                     open_id=open_id,
-                    text=admin_text,
+                    text=plan.admin_text,
                     log_name="餐费归档管理员通知",
                 )
                 if result == "sent":
@@ -429,7 +468,12 @@ class BookingService:
         else:
             logger.info("无统计接收人配置，跳过餐费归档管理员通知")
 
-        for open_id, user_text in user_notice_messages:
+        for open_id, user_text in plan.user_notice_messages:
+            logger.debug(
+                "餐费归档用户通知明细: open_id={} text={} attachment=付款码",
+                open_id,
+                user_text,
+            )
             result = self._send_text_notice(
                 open_id=open_id,
                 text=user_text,
@@ -448,8 +492,8 @@ class BookingService:
             window.run_date.isoformat(),
             window.start_date.isoformat(),
             window.end_date.isoformat(),
-            len(target_open_ids),
-            _format_decimal(total_fee),
+            len(plan.archive_records),
+            _format_decimal(plan.total_fee),
             int((mono_time.monotonic() - started_at) * 1000),
         )
         logger.info(
@@ -468,8 +512,97 @@ class BookingService:
             run_date=window.run_date,
             start_date=window.start_date,
             end_date=window.end_date,
-            user_count=len(target_open_ids),
+            user_count=len(plan.archive_records),
+            total_fee=plan.total_fee,
+        )
+
+    def _prepare_meal_fee_archive_execution(self, *, window: MealFeeArchiveWindow) -> MealFeeArchiveExecutionPlan:
+        summaries = self._repository.list_meal_fee_summaries(start_date=window.start_date, end_date=window.end_date)
+        summary_by_open_id = {item.open_id: item for item in summaries}
+        target_open_ids = sorted(summary_by_open_id.keys())
+
+        total_fee = Decimal("0")
+        total_lunch_count = 0
+        total_dinner_count = 0
+        archive_records: list[MealFeeArchiveRecord] = []
+        user_notice_messages: list[tuple[str, str]] = []
+        for open_id in target_open_ids:
+            summary = summary_by_open_id.get(open_id)
+            fee = summary.total_fee if summary else Decimal("0")
+            lunch_count = summary.lunch_count if summary else 0
+            dinner_count = summary.dinner_count if summary else 0
+            total_fee += fee
+            total_lunch_count += lunch_count
+            total_dinner_count += dinner_count
+            archive_records.append(
+                MealFeeArchiveRecord(
+                    open_id=open_id,
+                    fee=fee,
+                    lunch_count=lunch_count,
+                    dinner_count=dinner_count,
+                )
+            )
+            user_notice_messages.append(
+                (
+                    open_id,
+                    self._build_meal_fee_archive_user_notice_text(
+                        window=window,
+                        lunch_count=lunch_count,
+                        dinner_count=dinner_count,
+                        fee=fee,
+                    ),
+                )
+            )
+
+        admin_receivers = self._repository.list_stats_receiver_open_ids()
+        admin_text = None
+        if admin_receivers:
+            admin_text = self._build_meal_fee_archive_admin_notice_text(
+                window=window,
+                total_lunch_count=total_lunch_count,
+                total_dinner_count=total_dinner_count,
+                total_fee=total_fee,
+            )
+
+        return MealFeeArchiveExecutionPlan(
+            archive_records=archive_records,
+            user_notice_messages=user_notice_messages,
+            admin_receivers=admin_receivers,
+            admin_text=admin_text,
             total_fee=total_fee,
+            total_lunch_count=total_lunch_count,
+            total_dinner_count=total_dinner_count,
+        )
+
+    def _build_meal_fee_archive_user_notice_text(
+        self,
+        *,
+        window: MealFeeArchiveWindow,
+        lunch_count: int,
+        dinner_count: int,
+        fee: Decimal,
+    ) -> str:
+        meal_count = lunch_count + dinner_count
+        return (
+            f"餐费归档通知：{window.start_date.isoformat()}~{window.end_date.isoformat()}，"
+            f"你本月午餐 {lunch_count} 顿，晚餐 {dinner_count} 顿，共 {meal_count} 顿，"
+            f"餐费合计 {_format_decimal(fee)} 元。"
+        )
+
+    def _build_meal_fee_archive_admin_notice_text(
+        self,
+        *,
+        window: MealFeeArchiveWindow,
+        total_lunch_count: int,
+        total_dinner_count: int,
+        total_fee: Decimal,
+    ) -> str:
+        total_meal_count = total_lunch_count + total_dinner_count
+        return (
+            f"[管理员] 餐费归档表已更新：{window.start_date.isoformat()}~"
+            f"{window.end_date.isoformat()}，"
+            f"午餐 {total_lunch_count} 人次，晚餐 {total_dinner_count} 人次，"
+            f"总计 {total_meal_count} 人次，总收款 {_format_decimal(total_fee)} 元。"
         )
 
     def handle_message_event(self, data: P2ImMessageReceiveV1) -> None:
@@ -642,6 +775,11 @@ class BookingService:
         callback_context: CardCallbackUpdateContext | None,
     ) -> tuple[str | None, str | None, dict[str, Any] | None]:
         action_name = str(action_value.get("action") or "")
+        if not self._reservation_interactions_enabled:
+            disabled_text = self._disabled_action_text(action_name)
+            if disabled_text is not None:
+                return ("error", disabled_text, None)
+
         if callback_context is None or action_name not in {"toggle_meal", "refresh_state", "submit_leave_range"}:
             return self._process_action(
                 operator_open_id=operator_open_id,
@@ -965,6 +1103,11 @@ class BookingService:
                 operator_open_id or "",
                 action_name,
             )
+
+            if not self._reservation_interactions_enabled:
+                disabled_text = self._disabled_action_text(action_name)
+                if disabled_text is not None:
+                    return ("error", disabled_text, None)
 
             if not operator_open_id:
                 return ("error", "仅允许本人提交预约", None)
@@ -1498,6 +1641,18 @@ class BookingService:
             return target_date + timedelta(days=1)
         return target_date
 
+    @property
+    def _reservation_interactions_enabled(self) -> bool:
+        return self._config.features.reservation_interactions_enabled
+
+    @classmethod
+    def _disabled_action_text(cls, action_name: str) -> str | None:
+        if action_name in cls._RESERVATION_ACTIONS:
+            return cls._RESERVATION_DISABLED_TEXT
+        if action_name in cls._LEAVE_ACTIONS:
+            return cls._LEAVE_DISABLED_TEXT
+        return None
+
     @classmethod
     def _is_bot_unavailable_error(cls, exc: FeishuApiError) -> bool:
         return f"code={cls._FEISHU_BOT_UNAVAILABLE_CODE}" in str(exc)
@@ -1702,3 +1857,10 @@ def _format_decimal(value: Decimal) -> str:
     if not text:
         return "0"
     return text
+
+
+def _format_notice_target(open_id: str, display_name_by_open_id: dict[str, str]) -> str:
+    display_name = display_name_by_open_id.get(open_id)
+    if display_name:
+        return f"{display_name}({open_id})"
+    return open_id

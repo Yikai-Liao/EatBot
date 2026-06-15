@@ -8,6 +8,9 @@ help_doc = """
 每月发送餐费账单时，机器人也会自动附带付款码。
 """
 
+# 业务时区（表格日期解析、定时任务、统计口径统一按此时区）
+timezone = "Asia/Shanghai"
+
 [commands]
 today_card_texts = ["订餐", "/eatbot today", "当日卡片", "卡片"]
 leave_texts = ["请假"]
@@ -17,8 +20,9 @@ today_card_menu_event_keys = ["当日卡片"]
 leave_menu_event_keys = ["请假"]
 payment_qr_image_path = "assets/付款码.jpeg"
 
-# 业务时区（表格日期解析、定时任务、统计口径统一按此时区）
-timezone = "Asia/Shanghai"
+[features]
+# 是否启用预约交互功能；false 会禁用预约卡片、手动取卡、旧卡片回调写入和请假功能，不影响付款码与月度餐费归档。
+reservation_interactions_enabled = false
 
 [field_names.user_config]
 # 逻辑字段名 -> 表中真实字段名

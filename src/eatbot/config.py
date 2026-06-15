@@ -183,6 +183,10 @@ class LoggingConfig(BaseModel):
         return self.max_size_mb * 1024 * 1024
 
 
+class FeaturesConfig(BaseModel):
+    reservation_interactions_enabled: bool = True
+
+
 class CommandsConfig(BaseModel):
     today_card_texts: list[str] = Field(default_factory=lambda: ["订餐", "/eatbot today", "当日卡片", "卡片"])
     leave_texts: list[str] = Field(default_factory=lambda: ["请假"])
@@ -235,6 +239,7 @@ class RuntimeConfig(BaseModel):
     field_names: FieldNamesConfig
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    features: FeaturesConfig = Field(default_factory=FeaturesConfig)
 
     @model_validator(mode="before")
     @classmethod

@@ -26,7 +26,7 @@ from eatbot.app import (
 from eatbot.config import RuntimeConfig, ScheduleConfig
 
 
-def build_runtime_config(schedule: dict | None = None) -> RuntimeConfig:
+def build_runtime_config(schedule: dict | None = None, features: dict | None = None) -> RuntimeConfig:
     return RuntimeConfig.model_validate(
         {
             "app_id": "id",
@@ -72,6 +72,7 @@ def build_runtime_config(schedule: dict | None = None) -> RuntimeConfig:
                 },
             },
             **({"schedule": schedule} if schedule is not None else {}),
+            **({"features": features} if features is not None else {}),
         }
     )
 
@@ -199,6 +200,17 @@ def test_execute_cron_stats_keep_run_date_in_next_day_card_mode() -> None:
 
     app._booking.send_stats.assert_called_once()
     assert app._booking.send_stats.call_args.args[0] == date(2026, 2, 13)
+
+
+def test_execute_cron_fee_archive_runs_when_reservation_interactions_disabled() -> None:
+    runtime_config = build_runtime_config(features={"reservation_interactions_enabled": False})
+    app = EatBotApplication(enable_scheduler=False)
+    app._config = runtime_config
+    app._booking = Mock()
+
+    app.execute_cron_action(CronAction.FEE_ARCHIVE, run_at=datetime(2026, 2, 15, 21, 0))
+
+    app._booking.archive_meal_fees.assert_called_once_with(target_date=date(2026, 2, 15))
 
 
 def test_send_cards_command_passes_date(runner: CliRunner) -> None:

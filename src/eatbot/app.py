@@ -631,11 +631,23 @@ def send_text_command(
 @dev_cli.command("listen", help="开发联调模式：仅启动长连接，不启动定时任务。")
 def dev_listen_command(
     at: str | None = typer.Option(None, "--at", help="虚拟当前时间，格式 YYYY-MM-DDTHH:MM[:SS]。"),
+    log_level: LogLevelOption = typer.Option(
+        LogLevelOption.INFO,
+        "--log-level",
+        case_sensitive=False,
+        help="日志级别（同时作用于终端与文件日志），默认 info。",
+    ),
 ) -> None:
+    runtime_config = _load_runtime_config_or_exit()
+    configure_logging(
+        level=log_level,
+        file_path=runtime_config.logging.file_path,
+        file_max_size_bytes=runtime_config.logging.max_size_bytes,
+    )
     fake_now = _parse_cli_datetime(at, "--at")
     if fake_now is not None:
         logger.warning("开发联调虚拟时间: {}", fake_now.isoformat())
-    app = _bootstrap_application(now_at=fake_now, enable_scheduler=False)
+    app = _bootstrap_application(now_at=fake_now, enable_scheduler=False, runtime_config=runtime_config)
     app.run()
 
 
@@ -644,8 +656,19 @@ def dev_cron_command(
     from_: str = typer.Option(..., "--from", help="窗口开始时间，格式 YYYY-MM-DDTHH:MM[:SS]。"),
     to: str = typer.Option(..., "--to", help="窗口结束时间，格式 YYYY-MM-DDTHH:MM[:SS]。"),
     execute: bool = typer.Option(False, "--execute", help="执行窗口内命中的任务；默认仅预览不执行。"),
+    log_level: LogLevelOption = typer.Option(
+        LogLevelOption.INFO,
+        "--log-level",
+        case_sensitive=False,
+        help="日志级别（同时作用于终端与文件日志），默认 info。",
+    ),
 ) -> None:
     runtime_config = _load_runtime_config_or_exit()
+    configure_logging(
+        level=log_level,
+        file_path=runtime_config.logging.file_path,
+        file_max_size_bytes=runtime_config.logging.max_size_bytes,
+    )
     parsed_from = _parse_cli_datetime(from_, "--from")
     parsed_to = _parse_cli_datetime(to, "--to")
     if parsed_from is None or parsed_to is None:

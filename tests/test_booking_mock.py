@@ -17,7 +17,7 @@ from eatbot.services.booking import BookingService
 from eatbot.services.repositories import CancelMealResult
 
 
-def build_config(schedule: dict | None = None) -> RuntimeConfig:
+def build_config(schedule: dict | None = None, features: dict | None = None) -> RuntimeConfig:
     return RuntimeConfig.model_validate(
         {
             "app_id": "id",
@@ -64,6 +64,7 @@ def build_config(schedule: dict | None = None) -> RuntimeConfig:
                 },
             },
             **({"schedule": schedule} if schedule is not None else {}),
+            **({"features": features} if features is not None else {}),
         }
     )
 
@@ -129,6 +130,7 @@ class TestBookingServiceMock:
         self.repo.list_schedule_rules.return_value = []
         self.repo.list_user_profiles.return_value = [make_user(open_id="ou_sender"), make_user(open_id="ou_test")]
         self.repo.list_stats_receiver_open_ids.return_value = []
+        self.repo.list_meal_fee_summaries.return_value = []
         self.im = Mock()
         self.service = BookingService(config=build_config(), repository=self.repo, im=self.im)
 
@@ -145,6 +147,19 @@ class TestBookingServiceMock:
             price=Decimal("20"),
         )
         self.im.send_interactive.assert_called_once()
+
+    def test_send_daily_cards_skips_when_reservation_interactions_disabled(self) -> None:
+        service = BookingService(
+            config=build_config(features={"reservation_interactions_enabled": False}),
+            repository=self.repo,
+            im=self.im,
+        )
+
+        service.send_daily_cards(target_date=date(2026, 2, 12))
+
+        self.repo.list_schedule_rules.assert_not_called()
+        self.repo.list_user_profiles.assert_not_called()
+        self.im.send_interactive.assert_not_called()
 
     def test_send_daily_cards_prioritize_existing_records_for_button_state(self) -> None:
         self.repo.list_schedule_rules.return_value = []
@@ -270,6 +285,24 @@ class TestBookingServiceMock:
             self.service.handle_message_event(data)
             mocked.assert_called_once_with("ou_sender")
 
+    def test_handle_message_event_today_card_disabled_sends_notice(self) -> None:
+        service = BookingService(
+            config=build_config(features={"reservation_interactions_enabled": False}),
+            repository=self.repo,
+            im=self.im,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                message=SimpleNamespace(message_type="text", content='{"text":"订餐"}'),
+                sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+            )
+        )
+
+        service.handle_message_event(data)
+
+        self.im.send_text.assert_called_once_with("ou_sender", "预约卡片功能已停用。")
+        self.im.send_interactive.assert_not_called()
+
     def test_handle_message_event_triggers_today_card_with_today_card_text(self) -> None:
         with patch.object(self.service, "send_card_to_user_today") as mocked:
             data = SimpleNamespace(
@@ -316,6 +349,24 @@ class TestBookingServiceMock:
             self.service.handle_message_event(data)
             mocked.assert_called_once_with("ou_sender")
 
+    def test_handle_message_event_leave_disabled_sends_notice(self) -> None:
+        service = BookingService(
+            config=build_config(features={"reservation_interactions_enabled": False}),
+            repository=self.repo,
+            im=self.im,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                message=SimpleNamespace(message_type="text", content='{"text":"请假"}'),
+                sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+            )
+        )
+
+        service.handle_message_event(data)
+
+        self.im.send_text.assert_called_once_with("ou_sender", "请假功能已停用。")
+        self.im.send_interactive.assert_not_called()
+
     def test_handle_message_event_payment_qr_command_sends_payment_qr(self) -> None:
         with patch.object(self.service, "_send_payment_qr_notice") as mocked:
             data = SimpleNamespace(
@@ -325,6 +376,23 @@ class TestBookingServiceMock:
                 )
             )
             self.service.handle_message_event(data)
+
+            mocked.assert_called_once_with(open_id="ou_sender", log_name="付款码")
+
+    def test_handle_message_event_payment_qr_still_works_when_reservation_interactions_disabled(self) -> None:
+        service = BookingService(
+            config=build_config(features={"reservation_interactions_enabled": False}),
+            repository=self.repo,
+            im=self.im,
+        )
+        with patch.object(service, "_send_payment_qr_notice") as mocked:
+            data = SimpleNamespace(
+                event=SimpleNamespace(
+                    message=SimpleNamespace(message_type="text", content='{"text":"付款码"}'),
+                    sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_sender")),
+                )
+            )
+            service.handle_message_event(data)
 
             mocked.assert_called_once_with(open_id="ou_sender", log_name="付款码")
 
@@ -362,6 +430,24 @@ class TestBookingServiceMock:
             )
             self.service.handle_bot_menu_event(data)
             mocked.assert_called_once_with("ou_sender")
+
+    def test_handle_bot_menu_event_disabled_sends_notice(self) -> None:
+        service = BookingService(
+            config=build_config(features={"reservation_interactions_enabled": False}),
+            repository=self.repo,
+            im=self.im,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                event_key="当日卡片",
+                operator=SimpleNamespace(operator_id=SimpleNamespace(open_id="ou_sender")),
+            )
+        )
+
+        service.handle_bot_menu_event(data)
+
+        self.im.send_text.assert_called_once_with("ou_sender", "预约卡片功能已停用。")
+        self.im.send_interactive.assert_not_called()
 
     def test_handle_bot_menu_event_ignores_unknown_event_key(self) -> None:
         with patch.object(self.service, "send_card_to_user_today") as mocked:
@@ -404,6 +490,37 @@ class TestBookingServiceMock:
         self.repo.cancel_meal_record.assert_not_called()
         assert response.toast.type == "info"
         assert response.toast.content == "预约已更新"
+
+    def test_handle_card_action_reservation_disabled_does_not_write_records(self) -> None:
+        service = BookingService(
+            config=build_config(features={"reservation_interactions_enabled": False}),
+            repository=self.repo,
+            im=self.im,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                action=SimpleNamespace(
+                    value=build_action_value(
+                        action="toggle_meal",
+                        target_open_id="ou_sender",
+                        allowed_meals=["午餐", "晚餐"],
+                        default_meals=["午餐"],
+                        selected_meals=[],
+                        toggle_meal="午餐",
+                    ),
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+
+        self.repo.list_user_meal_rows.assert_not_called()
+        self.repo.upsert_meal_record.assert_not_called()
+        self.repo.cancel_meal_record.assert_not_called()
+        assert response.toast.type == "error"
+        assert response.toast.content == "预约卡片功能已停用。"
 
     def test_handle_card_action_selected_meals_from_action_value(self) -> None:
         data = SimpleNamespace(
@@ -1144,6 +1261,34 @@ class TestBookingServiceMock:
         payload = json.loads(self.im.send_interactive.call_args.kwargs["card_json"])
         assert payload["header"]["title"]["content"] == "请假暂停自动预约"
 
+    def test_handle_card_action_leave_disabled_does_not_mark_unreserved(self) -> None:
+        service = BookingService(
+            config=build_config(features={"reservation_interactions_enabled": False}),
+            repository=self.repo,
+            im=self.im,
+        )
+        data = SimpleNamespace(
+            event=SimpleNamespace(
+                action=SimpleNamespace(
+                    value={
+                        "action": "submit_leave_range",
+                        "target_date": "2026-12-31",
+                        "target_open_id": "ou_sender",
+                        "selected_start_date": "2026-12-31",
+                        "selected_end_date": "2027-01-01",
+                    },
+                    form_value={},
+                ),
+                operator=SimpleNamespace(open_id="ou_sender"),
+            )
+        )
+
+        response = service.handle_card_action(data)
+
+        self.repo.mark_meal_record_unreserved.assert_not_called()
+        assert response.toast.type == "error"
+        assert response.toast.content == "请假功能已停用。"
+
     def test_handle_card_action_submit_leave_range_marks_range_unreserved(self) -> None:
         self.repo.list_schedule_rules.return_value = [
             MealScheduleRule(
@@ -1426,6 +1571,47 @@ class TestBookingServiceMock:
 
         assert should_run is True
         assert "归档区间=2026-09-02~2026-10-01（闭区间）" in detail
+
+    def test_preview_fee_archive_includes_notice_details(self) -> None:
+        self.repo.list_meal_fee_summaries.return_value = [
+            SimpleNamespace(
+                open_id="ou_sender",
+                total_fee=Decimal("45"),
+                lunch_count=2,
+                dinner_count=1,
+            )
+        ]
+        self.repo.list_stats_receiver_open_ids.return_value = ["ou_admin"]
+        self.repo.list_user_profiles.return_value = [
+            UserProfile(
+                open_id="ou_sender",
+                display_name="张三",
+                enabled=True,
+                lunch_price=Decimal("20"),
+                dinner_price=Decimal("25"),
+                meal_preferences={Meal.LUNCH},
+            ),
+            UserProfile(
+                open_id="ou_admin",
+                display_name="管理员",
+                enabled=True,
+                lunch_price=Decimal("20"),
+                dinner_price=Decimal("25"),
+                meal_preferences={Meal.LUNCH},
+            ),
+        ]
+
+        should_run, detail = self.service.preview_fee_archive(target_date=date(2026, 2, 15))
+
+        assert should_run is True
+        assert "写归档表=1 条" in detail
+        assert "管理员通知=1" in detail
+        assert "用户通知=1" in detail
+        assert "归档写表:" in detail
+        assert "张三(ou_sender): 午餐=2 晚餐=1 费用=45 元" in detail
+        assert "管理员(ou_admin) <- [管理员] 餐费归档表已更新：2026-01-16~2026-02-15" in detail
+        assert "张三(ou_sender) <- 餐费归档通知：2026-01-16~2026-02-15" in detail
+        assert "[附带: 付款码]" in detail
 
     def test_archive_meal_fees_updates_table_and_sends_notifications(self) -> None:
         self.repo.list_meal_fee_summaries.return_value = [

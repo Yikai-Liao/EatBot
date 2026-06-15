@@ -147,6 +147,7 @@ flowchart TD
 - `config.local.toml`：本地私密，保存 app_id、app_secret、app_token、wiki_token、tables 与日志配置。
 - `config.local.example.toml`：可提交的私密配置模板，部署时复制为 `config.local.toml` 后填写真实值。
 - `timezone`（根级）用于定义全局业务时区，表格日期解析、定时任务与统计口径都按该时区计算。
+- `features.reservation_interactions_enabled=false` 可禁用预约交互：每日/手动预约卡片、旧预约卡片回调写入和请假功能都会停用；`付款码` 命令与月度餐费归档不受影响。
 - `config.shared.toml` 中 `schedule` 段用于配置发卡时间、发卡业务日期模式 `send_cards_for_next_day`、主动取卡切换点 `card_request_cutover`、午/晚餐截止时间、午/晚餐最小成团人数、统计偏移 `send_stat_offset` 以及用餐定时配置缓存时长 `schedule_cache_ttl_minutes`。
 - 用餐定时配置缓存默认 30 分钟；每日发卡任务开始前会强制刷新一次缓存，单批用户发送过程不重复拉表。
 - 加载建议：先加载 `config.shared.toml`，再用 `config.local.toml` 覆盖。
@@ -274,20 +275,22 @@ eatbot
 - 一次性给所有已启用用户发送文本消息，不启动常驻服务。
 - `TEXT...` 会把命令行剩余内容按空格拼接成一条消息。
 
-- `eatbot dev listen [--at YYYY-MM-DDTHH:MM[:SS]]`
+- `eatbot dev listen [--at YYYY-MM-DDTHH:MM[:SS]] [--log-level debug|info|warning|error]`
 - 开发联调模式：仅启动长连接，不启动定时任务。
 - `--at` 用于注入虚拟当前时间（截止逻辑联调）。
 - 长连接会忽略宿主机代理配置，避免本地 SOCKS 代理影响飞书联调。
 
-- `eatbot dev cron --from YYYY-MM-DDTHH:MM[:SS] --to YYYY-MM-DDTHH:MM[:SS] [--execute]`
+- `eatbot dev cron --from YYYY-MM-DDTHH:MM[:SS] --to YYYY-MM-DDTHH:MM[:SS] [--execute] [--log-level debug|info|warning|error]`
 - 定时器窗口验证命令。
 - 默认 dry-run：仅输出窗口内应触发的任务。
 - 加 `--execute`：按时间顺序执行窗口内应触发任务。
+- `--log-level debug` 可展开逐条调试日志，例如餐费归档的写表明细、管理员通知和用户通知内容。
 
 ### 10.3 参数语义
 - `--date`：业务日期（发卡/发统计对应哪一天）。
 - `--at`：虚拟当前时间（仅 `dev listen`，支持秒）。
 - `--from`/`--to`：定时器验证窗口（仅 `dev cron`，支持秒）。
+- `--log-level`：日志级别；`dev` 命令支持写入文件日志并打印 debug 明细。
 
 ### 10.4 调用示例
 - `uv run eatbot check`
@@ -298,6 +301,7 @@ eatbot
 - `uv run eatbot send text 上面为食堂付款测试，不需要付钱`
 - `uv run eatbot dev listen --at 2026-02-14T10:31:30`
 - `uv run eatbot dev cron --from 2026-02-14T09:00:00 --to 2026-02-14T11:00:00`
+- `uv run eatbot dev cron --from 2026-06-15T20:59:00 --to 2026-06-15T21:01:00 --log-level debug`
 - `uv run eatbot dev cron --from 2026-02-14T09:00:00 --to 2026-02-14T11:00:00 --execute`
 
 ### 9.5 旧参数迁移
